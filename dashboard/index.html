@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MMON — Morpheus MONitoring</title>
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+
+    <!-- GridStack (drag & resize) -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/gridstack.js/10.1.2/gridstack.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/gridstack.js/10.1.2/gridstack-extra.min.css" rel="stylesheet">
+
+    <!-- HTMX -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/htmx/1.9.12/htmx.min.js"></script>
+
+    <!-- App CSS -->
+    <link rel="stylesheet" href="/css/dashboard.css">
+</head>
+<body>
+
+<div class="app">
+
+    <!-- HEADER -->
+    <header class="header">
+        <div class="header-brand">
+            <span class="logo">MMON</span>
+            <span class="version">v0.1.0</span>
+        </div>
+        <div class="header-actions">
+            <div class="header-status">
+                <span class="status-dot" id="api-status"></span>
+                <span id="api-status-text">Connecting...</span>
+            </div>
+            <button class="btn-icon" id="btn-refresh" title="Refresh all widgets">&#8635;</button>
+            <button class="btn-icon" id="btn-reset-layout" title="Reset layout">&#9638;</button>
+            <button class="btn-icon" id="btn-logout" title="Logout">&#9211;</button>
+        </div>
+    </header>
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+        <div class="sidebar-section">
+            <div class="sidebar-section-title">Filters</div>
+
+            <div class="filter-group">
+                <label>Severity</label>
+                <div class="severity-filters" id="severity-filters">
+                    <span class="severity-badge critical active" data-severity="critical">CRIT</span>
+                    <span class="severity-badge high active" data-severity="high">HIGH</span>
+                    <span class="severity-badge medium active" data-severity="medium">MED</span>
+                    <span class="severity-badge low active" data-severity="low">LOW</span>
+                    <span class="severity-badge info active" data-severity="info">INFO</span>
+                </div>
+            </div>
+
+            <div class="filter-group">
+                <label>Source VM</label>
+                <select class="filter-select" id="filter-vm">
+                    <option value="">All VMs</option>
+                    <option value="vm1">VM1 — Clearnet</option>
+                    <option value="vm2">VM2 — Deep Web</option>
+                    <option value="vm3">VM3 — Telegram</option>
+                </select>
+            </div>
+
+            <div class="filter-group">
+                <label>Date range</label>
+                <input type="date" class="filter-input" id="filter-date-from" placeholder="From">
+                <input type="date" class="filter-input" id="filter-date-to" placeholder="To" style="margin-top: 4px;">
+            </div>
+        </div>
+
+        <div class="sidebar-section">
+            <div class="sidebar-section-title">Quick Stats</div>
+            <div id="quick-stats" style="padding: 0 8px;">
+                <div style="font-family: var(--font-mono); font-size: 24px; color: var(--accent);" id="stat-total">—</div>
+                <div style="font-size: 11px; color: var(--text-muted);">Total findings</div>
+                <div style="margin-top: 12px; font-family: var(--font-mono); font-size: 18px; color: var(--error);" id="stat-critical">—</div>
+                <div style="font-size: 11px; color: var(--text-muted);">Critical + High</div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- MAIN CONTENT -->
+    <main class="main-content">
+        <div class="grid-stack" id="widget-grid"></div>
+    </main>
+
+</div>
+
+<!-- LOGIN MODAL (shown if no token) -->
+<div id="login-overlay" style="display:none; position:fixed; inset:0; background:rgba(6,10,16,0.95); z-index:1000; display:flex; align-items:center; justify-content:center;">
+    <div style="background:var(--bg-card); border:1px solid var(--border); border-radius:8px; padding:40px; width:360px; text-align:center;">
+        <div style="font-family:var(--font-mono); font-size:24px; color:var(--accent); letter-spacing:3px; margin-bottom:8px;">MMON</div>
+        <div style="font-size:12px; color:var(--text-muted); margin-bottom:32px;">Morpheus MONitoring</div>
+        <form id="login-form">
+            <input type="text" id="login-user" placeholder="Username" required
+                style="width:100%; padding:12px; margin-bottom:12px; background:var(--bg-input); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); font-size:14px; outline:none;">
+            <input type="password" id="login-pass" placeholder="Password" required
+                style="width:100%; padding:12px; margin-bottom:20px; background:var(--bg-input); border:1px solid var(--border); border-radius:6px; color:var(--text-primary); font-family:var(--font-mono); font-size:14px; outline:none;">
+            <div id="login-error" style="color:var(--error); font-size:12px; margin-bottom:12px; display:none;"></div>
+            <button type="submit"
+                style="width:100%; padding:12px; background:var(--accent); color:var(--bg-base); border:none; border-radius:6px; font-family:var(--font-mono); font-size:14px; font-weight:700; cursor:pointer; box-shadow:0 0 16px var(--accent-glow);">
+                LOGIN
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- GridStack JS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gridstack.js/10.1.2/gridstack-all.js"></script>
+
+<!-- MMON Widget Engine -->
+<script src="/js/widget-engine.js"></script>
+
+<!-- Widget modules -->
+<script src="/js/widgets/social-footprint.js"></script>
+<script src="/js/widgets/infrastructure.js"></script>
+<script src="/js/widgets/cve-feed.js"></script>
+<script src="/js/widgets/keywords.js"></script>
+<script src="/js/widgets/competitors.js"></script>
+
+<!-- Init -->
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        MMON.init();
+    });
+</script>
+
+</body>
+</html>

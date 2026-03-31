@@ -1,0 +1,54 @@
+# MMON .gitignore
+
+# Config con secrets
+config/mmon.conf
+config/*.key
+config/*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtualenv
+vm1/venv/
+vm2/venv/
+vm3/venv/
+backend/venv/
+.venv/
+
+# Logs
+*.log
+vm1/logs/
+vm2/logs/
+vm3/logs/
+backend/logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database dumps
+*.sql.bak
+*.dump
+
+# Redis
+dump.rdb
+
+# Node (se usato per build tool dashboard)
+node_modules/
+
+# Ollama models
+models/

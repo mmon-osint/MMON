@@ -1,0 +1,70 @@
+# MMON Configuration File
+# Generato automaticamente dal Setup Wizard
+# NON modificare manualmente a meno che tu sappia cosa stai facendo.
+# NON committare questo file nel repository (contiene secret).
+
+[general]
+mode = personal
+# mode = company
+
+[target]
+company_name = Example Corp
+domains = example.com,example.org
+public_ips = 203.0.113.10,203.0.113.11
+emails = info@example.com,admin@example.com
+
+[social]
+usernames = johndoe,janedoe
+full_names = John Doe,Jane Doe
+
+[technologies]
+stack = nginx,postgresql,python,wordpress
+
+[sector]
+industry = cybersecurity
+products = monitoring,saas
+
+[api_keys]
+shodan_key =
+criminal_ip_key =
+quake360_key =
+
+[infrastructure]
+backend_ip = 192.168.1.10
+vm1_ip = 192.168.1.11
+vm2_ip = 192.168.1.12
+vm3_ip = 192.168.1.13
+
+[database]
+host = 127.0.0.1
+port = 5432
+name = mmon
+user = mmon
+password = CHANGE_ME
+
+[redis]
+host = 127.0.0.1
+port = 6379
+
+[tor]
+socks_port = 9050
+control_port = 9051
+control_password =
+
+[telegram]
+api_id =
+api_hash =
+phone =
+
+[scheduler]
+scan_interval_hours = 24
+max_concurrent_tools = 3
+
+[jwt]
+secret_key = CHANGE_ME_GENERATE_RANDOM_64_CHARS
+algorithm = HS256
+access_token_expire_minutes = 60
+
+[ollama]
+base_url = http://127.0.0.1:11434
+model = qwen2.5:14b
