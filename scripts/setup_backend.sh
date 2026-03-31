@@ -94,22 +94,22 @@ install_python() {
 # 3. POSTGRESQL 16
 # =============================================================
 
-#install_postgresql() {
-#   log_info "Installazione PostgreSQL 16..."
-#
-   # Repository ufficiale PostgreSQL
-#    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
- #   echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-  #      > /etc/apt/sources.list.d/pgdg.list
-#
- #   apt-get update -qq
-  #  apt-get install -y -qq postgresql-16 postgresql-contrib-16
-#
- #   systemctl enable postgresql
- #  systemctl start postgresql
+install_postgresql() {
+   log_info "Installazione PostgreSQL 16..."
 
-  #  log_ok "PostgreSQL $(psql --version | head -1) installato e avviato."
-#}
+   # Repository ufficiale PostgreSQL
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list
+
+    apt-get update -qq
+    apt-get install -y -qq postgresql-16 postgresql-contrib-16
+
+    systemctl enable postgresql
+   systemctl start postgresql
+
+    log_ok "PostgreSQL $(psql --version | head -1) installato e avviato."
+}
 
 setup_database() {
     log_info "Configurazione database MMON..."
