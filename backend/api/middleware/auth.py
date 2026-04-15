@@ -1,98 +1,48 @@
 """
-MMON — JWT Authentication middleware e utilities.
+MMON — Authentication middleware.
+JWT (Personal mode) + Keycloak (Company mode) + VM auth.
 """
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
-from uuid import UUID
+from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Depends, Header, HTTPException, Request, status
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.config import get_settings
-from api.database import get_db
-from models.db_models import User
+from ..config import get_settings
+from ..database import get_db
+from ...models.db_models import User
 
-# Password hashing
+settings = get_settings()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-# Bearer token scheme
-bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def hash_password(password: str) -> str:
-    """Hash una password con bcrypt."""
+    """Hash password con bcrypt."""
     return pwd_context.hash(password)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Verifica password plain vs hash bcrypt."""
+    """Verifica password contro hash bcrypt."""
     return pwd_context.verify(plain, hashed)
 
 
-def create_access_token(
-    user_id: str,
-    username: str,
-    role: str,
-    expires_delta: Optional[timedelta] = None,
-) -> str:
-    """
-    Genera un JWT access token.
-
-    Args:
-        user_id: UUID dell'utente come stringa
-        username: username dell'utente
-        role: ruolo (admin, analyst, viewer)
-        expires_delta: durata custom del token
-
-    Returns:
-        Token JWT firmato
-    """
-    settings = get_settings()
-
-    if expires_delta is None:
-        expires_delta = timedelta(minutes=settings.jwt_expire_minutes)
-
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": user_id,
-        "username": username,
-        "role": role,
-        "iat": now,
-        "exp": now + expires_delta,
-    }
-
-    return jwt.encode(
-        payload,
-        settings.jwt_secret_key,
-        algorithm=settings.jwt_algorithm,
-    )
+def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
+    """Crea JWT token."""
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.jwt_expire_minutes))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 
 def decode_token(token: str) -> dict:
-    """
-    Decodifica e valida un JWT token.
-
-    Args:
-        token: JWT string
-
-    Returns:
-        Payload decodificato
-
-    Raises:
-        HTTPException 401 se token invalido o scaduto
-    """
-    settings = get_settings()
+    """Decodifica e valida JWT token."""
     try:
-        payload = jwt.decode(
-            token,
-            settings.jwt_secret_key,
-            algorithms=[settings.jwt_algorithm],
-        )
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
         return payload
     except JWTError as e:
         raise HTTPException(
@@ -103,74 +53,43 @@ def decode_token(token: str) -> dict:
 
 
 async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """
-    Dependency FastAPI: estrae e valida l'utente dal JWT token.
-
-    Returns:
-        Oggetto User dal database
-
-    Raises:
-        HTTPException 401 se token mancante, invalido, o utente non trovato
-    """
-    if credentials is None:
+    """Dependency: estrae utente corrente dal Bearer token."""
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token di autenticazione mancante",
+            detail="Token mancante",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    payload = decode_token(credentials.credentials)
-    user_id = payload.get("sub")
+    token = auth_header[7:]
+    payload = decode_token(token)
+    username = payload.get("sub")
+    if not username:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token payload invalido")
 
-    if not user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token payload invalido",
-        )
-
-    result = await db.execute(
-        select(User).where(User.user_id == UUID(user_id))
-    )
+    result = await db.execute(select(User).where(User.username == username, User.is_active.is_(True)))
     user = result.scalar_one_or_none()
-
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Utente non trovato",
-        )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account disabilitato",
-        )
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Utente non trovato o disabilitato")
 
     return user
 
 
-def require_role(required_role: str):
-    """
-    Factory per dependency che verifica il ruolo utente.
-
-    Args:
-        required_role: ruolo minimo richiesto (admin > analyst > viewer)
-
-    Returns:
-        Dependency function
-    """
+def require_role(min_role: str):
+    """Factory dependency: verifica ruolo minimo (viewer < analyst < admin)."""
     role_hierarchy = {"viewer": 0, "analyst": 1, "admin": 2}
 
     async def check_role(user: User = Depends(get_current_user)) -> User:
         user_level = role_hierarchy.get(user.role, 0)
-        required_level = role_hierarchy.get(required_role, 0)
-
+        required_level = role_hierarchy.get(min_role, 0)
         if user_level < required_level:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Ruolo '{required_role}' richiesto. Ruolo attuale: '{user.role}'",
+                detail=f"Ruolo {min_role} richiesto, hai {user.role}",
             )
         return user
 
@@ -179,42 +98,21 @@ def require_role(required_role: str):
 
 async def authenticate_vm(
     request: Request,
+    x_vm_name: Annotated[str | None, Header()] = None,
 ) -> str:
-    """
-    Autenticazione per le VM (API key o IP whitelist).
-    Le VM usano un header X-VM-Token per autenticarsi.
+    """Dependency: autentica richieste dalle VM via IP whitelist + header."""
+    client_ip = request.client.host if request.client else "unknown"
 
-    Returns:
-        Nome della VM autenticata (vm1, vm2, vm3)
-
-    Raises:
-        HTTPException 401 se non autenticata
-    """
-    settings = get_settings()
-
-    # Verificare IP whitelist
-    client_ip = request.client.host if request.client else None
-    allowed_ips = [
-        settings.vm1_ip,
-        settings.vm2_ip,
-        settings.vm3_ip,
-        "127.0.0.1",
-        "::1",
-    ]
-    allowed_ips = [ip for ip in allowed_ips if ip]
-
-    if client_ip not in allowed_ips:
+    if client_ip not in settings.vm_whitelist:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail=f"IP {client_ip} non autorizzato",
         )
 
-    # Determinare quale VM sta chiamando
-    vm_header = request.headers.get("X-VM-Name", "")
-    if vm_header not in ("vm1", "vm2", "vm3"):
+    if not x_vm_name or x_vm_name not in ("vm1", "vm2", "vm3"):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=status.HTTP_403_FORBIDDEN,
             detail="Header X-VM-Name mancante o invalido",
         )
 
-    return vm_header
+    return x_vm_name

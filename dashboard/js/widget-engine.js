@@ -1,133 +1,135 @@
 /**
- * MMON — Widget Engine
- * Core del sistema dashboard: auth, fetch, grid, widget lifecycle.
+ * MMON — Widget Engine Core
+ * Gestisce auth, GridStack, widget lifecycle, filtri, auto-refresh.
  */
 
-const MMON = (() => {
+const MMON = (function () {
     'use strict';
 
-    // =========================================================
-    // STATE
-    // =========================================================
+    // ── State ──
+    let _token = localStorage.getItem('mmon_token') || null;
+    let _grid = null;
+    const _widgets = {};
+    const _filters = { severity: ['critical', 'high', 'medium', 'low', 'info'], source_vm: null, date_from: null, date_to: null };
+    let _refreshTimer = null;
 
-    const state = {
-        token: localStorage.getItem('mmon_token') || null,
-        grid: null,
-        widgets: {},       // registry: { id: { render, refresh } }
-        filters: {
-            severity: ['critical', 'high', 'medium', 'low', 'info'],
-            source_vm: '',
-            date_from: '',
-            date_to: '',
-        },
-    };
+    // ── Auth ──
+    function setToken(t) { _token = t; localStorage.setItem('mmon_token', t); }
+    function clearToken() { _token = null; localStorage.removeItem('mmon_token'); }
 
-    const API_BASE = '/api/v1';
+    async function login() {
+        const user = document.getElementById('login-user').value;
+        const pass = document.getElementById('login-pass').value;
+        const errEl = document.getElementById('login-error');
+        errEl.textContent = '';
 
-    // =========================================================
-    // AUTH
-    // =========================================================
-
-    function isAuthenticated() {
-        return !!state.token;
-    }
-
-    function setToken(token) {
-        state.token = token;
-        localStorage.setItem('mmon_token', token);
-    }
-
-    function clearToken() {
-        state.token = null;
-        localStorage.removeItem('mmon_token');
-    }
-
-    async function login(username, password) {
-        const res = await fetch(`${API_BASE}/auth/login`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password }),
-        });
-
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.detail || 'Login fallito');
+        try {
+            const resp = await fetch('/api/v1/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: user, password: pass }),
+            });
+            if (!resp.ok) {
+                const data = await resp.json();
+                errEl.textContent = data.detail || 'Login failed';
+                return;
+            }
+            const data = await resp.json();
+            setToken(data.access_token);
+            showApp();
+        } catch (e) {
+            errEl.textContent = 'Connection error';
         }
-
-        const data = await res.json();
-        setToken(data.access_token);
-        return data;
     }
 
-    function logout() {
-        clearToken();
-        location.reload();
+    function logout() { clearToken(); location.reload(); }
+
+    // ── API Fetch ──
+    async function apiFetch(path, opts = {}) {
+        const url = path.startsWith('/') ? `/api/v1${path}` : `/api/v1/${path}`;
+        const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+        if (_token) headers['Authorization'] = `Bearer ${_token}`;
+
+        const resp = await fetch(url, { ...opts, headers });
+        if (resp.status === 401) { clearToken(); location.reload(); return null; }
+        if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText}`);
+        return resp.json();
     }
 
-    // =========================================================
-    // API FETCH
-    // =========================================================
-
-    async function apiFetch(endpoint, options = {}) {
-        const headers = {
-            'Content-Type': 'application/json',
-            ...(state.token ? { 'Authorization': `Bearer ${state.token}` } : {}),
-            ...(options.headers || {}),
-        };
-
-        const res = await fetch(`${API_BASE}${endpoint}`, {
-            ...options,
-            headers,
-        });
-
-        if (res.status === 401) {
-            clearToken();
-            showLogin();
-            throw new Error('Sessione scaduta');
-        }
-
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({}));
-            throw new Error(err.detail || `HTTP ${res.status}`);
-        }
-
-        return res.json();
-    }
-
-    // =========================================================
-    // GRID (GridStack)
-    // =========================================================
-
+    // ── GridStack Init ──
     function initGrid() {
-        state.grid = GridStack.init({
+        _grid = GridStack.init({
             column: 12,
             cellHeight: 80,
             margin: 8,
             animate: true,
-            float: true,
-            removable: false,
-            resizable: { handles: 'se, sw' },
+            float: false,
             draggable: { handle: '.widget-header' },
-        }, '#widget-grid');
+            resizable: { handles: 'se' },
+        }, '#grid');
 
-        // Salva layout quando cambia
-        state.grid.on('change', saveLayout);
+        _grid.on('change', saveLayout);
     }
 
-    function saveLayout() {
-        if (!state.grid) return;
-        const items = state.grid.save(false);
-        localStorage.setItem('mmon_layout', JSON.stringify(items));
+    // ── Widget Registration ──
+    function registerWidget(id, config) {
+        _widgets[id] = config;
     }
 
-    function loadLayout() {
+    function createWidgetHTML(id, config) {
+        return `
+            <div class="grid-stack-item" gs-id="${id}" gs-x="${config.gridPos.x}" gs-y="${config.gridPos.y}" gs-w="${config.gridPos.w}" gs-h="${config.gridPos.h}">
+                <div class="grid-stack-item-content">
+                    <div class="widget-header">
+                        <span class="widget-title">${config.title}</span>
+                        <div class="widget-actions">
+                            <button class="widget-btn" onclick="MMON.refreshWidget('${id}')" title="Refresh">↻</button>
+                        </div>
+                    </div>
+                    <div class="widget-body" id="widget-body-${id}">
+                        <div class="spinner"></div>
+                    </div>
+                </div>
+            </div>`;
+    }
+
+    function mountWidgets() {
+        const html = Object.entries(_widgets).map(([id, cfg]) => createWidgetHTML(id, cfg)).join('');
+        document.getElementById('grid').innerHTML = html;
+        initGrid();
+
+        // Load saved layout
         const saved = localStorage.getItem('mmon_layout');
-        if (!saved) return null;
-        try {
-            return JSON.parse(saved);
-        } catch {
-            return null;
+        if (saved) {
+            try { _grid.load(JSON.parse(saved)); } catch (e) { /* ignore */ }
         }
+
+        // Render tutti
+        Object.keys(_widgets).forEach(id => refreshWidget(id));
+    }
+
+    async function refreshWidget(id) {
+        const config = _widgets[id];
+        if (!config || !config.render) return;
+
+        const body = document.getElementById(`widget-body-${id}`);
+        if (!body) return;
+
+        try {
+            body.innerHTML = '<div class="spinner"></div>';
+            await config.render(body, _filters);
+        } catch (e) {
+            body.innerHTML = `<div class="widget-empty"><div style="color:var(--error);">Error: ${e.message}</div></div>`;
+        }
+    }
+
+    function refreshAll() { Object.keys(_widgets).forEach(id => refreshWidget(id)); updateQuickStats(); }
+
+    // ── Layout Save/Load ──
+    function saveLayout() {
+        if (!_grid) return;
+        const items = _grid.save(false);
+        localStorage.setItem('mmon_layout', JSON.stringify(items));
     }
 
     function resetLayout() {
@@ -135,260 +137,106 @@ const MMON = (() => {
         location.reload();
     }
 
-    // =========================================================
-    // WIDGET MANAGEMENT
-    // =========================================================
-
-    /**
-     * Registra un widget nel sistema.
-     * @param {string} id - ID univoco del widget
-     * @param {object} config - { title, gridPos: {x,y,w,h}, render(container), refresh() }
-     */
-    function registerWidget(id, config) {
-        state.widgets[id] = config;
-    }
-
-    function createWidgetHTML(id, title) {
-        return `
-            <div class="grid-stack-item-content" id="widget-${id}">
-                <div class="widget-header">
-                    <span class="widget-title">${title}</span>
-                    <div class="widget-actions">
-                        <span class="widget-count" id="count-${id}">—</span>
-                        <button class="widget-btn" onclick="MMON.refreshWidget('${id}')" title="Refresh">&#8635;</button>
-                    </div>
-                </div>
-                <div class="widget-body" id="body-${id}">
-                    <div class="widget-loading">
-                        <div class="spinner"></div>
-                        Loading...
-                    </div>
-                </div>
-            </div>
-        `;
-    }
-
-    function mountWidgets() {
-        const savedLayout = loadLayout();
-
-        for (const [id, config] of Object.entries(state.widgets)) {
-            const html = createWidgetHTML(id, config.title);
-            let gridPos = config.gridPos;
-
-            // Usare posizione salvata se disponibile
-            if (savedLayout) {
-                const saved = savedLayout.find(s => s.id === id);
-                if (saved) {
-                    gridPos = { x: saved.x, y: saved.y, w: saved.w, h: saved.h };
-                }
+    // ── Filters ──
+    function applyFilters() {
+        // Severity
+        const sevFilters = document.querySelectorAll('#sev-filters .sev-filter');
+        _filters.severity = [];
+        sevFilters.forEach(el => {
+            const cb = el.querySelector('input');
+            if (cb.checked) {
+                _filters.severity.push(el.dataset.sev);
+                el.classList.add('active');
+            } else {
+                el.classList.remove('active');
             }
-
-            state.grid.addWidget({
-                id: id,
-                x: gridPos.x,
-                y: gridPos.y,
-                w: gridPos.w,
-                h: gridPos.h,
-                content: html,
-            });
-        }
-    }
-
-    async function refreshWidget(id) {
-        const config = state.widgets[id];
-        if (!config) return;
-
-        const body = document.getElementById(`body-${id}`);
-        if (!body) return;
-
-        body.innerHTML = '<div class="widget-loading"><div class="spinner"></div>Loading...</div>';
-
-        try {
-            await config.render(body, state.filters);
-        } catch (err) {
-            body.innerHTML = `<div class="widget-empty"><div class="empty-icon">&#9888;</div><div>${err.message}</div></div>`;
-        }
-    }
-
-    async function refreshAllWidgets() {
-        const promises = Object.keys(state.widgets).map(id => refreshWidget(id));
-        await Promise.allSettled(promises);
-    }
-
-    // =========================================================
-    // FILTERS
-    // =========================================================
-
-    function initFilters() {
-        // Severity toggle
-        document.getElementById('severity-filters')?.addEventListener('click', (e) => {
-            const badge = e.target.closest('.severity-badge');
-            if (!badge) return;
-
-            badge.classList.toggle('active');
-            state.filters.severity = Array.from(
-                document.querySelectorAll('.severity-badge.active')
-            ).map(b => b.dataset.severity);
-
-            refreshAllWidgets();
         });
 
-        // VM filter
-        document.getElementById('filter-vm')?.addEventListener('change', (e) => {
-            state.filters.source_vm = e.target.value;
-            refreshAllWidgets();
-        });
+        // VM
+        _filters.source_vm = document.getElementById('vm-filter').value || null;
 
-        // Date filters
-        document.getElementById('filter-date-from')?.addEventListener('change', (e) => {
-            state.filters.date_from = e.target.value;
-            refreshAllWidgets();
-        });
+        // Date
+        _filters.date_from = document.getElementById('date-from').value || null;
+        _filters.date_to = document.getElementById('date-to').value || null;
 
-        document.getElementById('filter-date-to')?.addEventListener('change', (e) => {
-            state.filters.date_to = e.target.value;
-            refreshAllWidgets();
-        });
+        refreshAll();
     }
 
-    // =========================================================
-    // API STATUS + QUICK STATS
-    // =========================================================
-
-    async function checkApiStatus() {
-        const dot = document.getElementById('api-status');
-        const text = document.getElementById('api-status-text');
-
-        try {
-            const data = await fetch('/health').then(r => r.json());
-            dot.className = 'status-dot';
-            text.textContent = `Online — ${data.mode}`;
-        } catch {
-            dot.className = 'status-dot offline';
-            text.textContent = 'Offline';
-        }
-    }
-
+    // ── Quick Stats ──
     async function updateQuickStats() {
         try {
             const data = await apiFetch('/findings?page_size=1');
-            document.getElementById('stat-total').textContent = data.total || 0;
+            if (data) document.getElementById('stat-findings').textContent = data.total || 0;
+        } catch (e) { /* ignore */ }
+    }
 
-            const crit = await apiFetch('/findings?severity=critical&page_size=1');
-            const high = await apiFetch('/findings?severity=high&page_size=1');
-            document.getElementById('stat-critical').textContent =
-                (crit.total || 0) + (high.total || 0);
-        } catch {
-            // silently fail
+    // ── API Status ──
+    async function checkApiStatus() {
+        try {
+            const resp = await fetch('/health');
+            const dot = document.getElementById('api-status-dot');
+            const txt = document.getElementById('api-status-text');
+            if (resp.ok) {
+                dot.classList.remove('offline');
+                txt.textContent = 'Connected';
+            } else {
+                dot.classList.add('offline');
+                txt.textContent = 'Degraded';
+            }
+        } catch (e) {
+            document.getElementById('api-status-dot').classList.add('offline');
+            document.getElementById('api-status-text').textContent = 'Offline';
         }
     }
 
-    // =========================================================
-    // LOGIN UI
-    // =========================================================
+    // ── Utilities ──
+    function severityClass(sev) { return `sev sev-${sev}`; }
 
-    function showLogin() {
-        document.getElementById('login-overlay').style.display = 'flex';
-    }
-
-    function hideLogin() {
-        document.getElementById('login-overlay').style.display = 'none';
-    }
-
-    function initLoginForm() {
-        document.getElementById('login-form')?.addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const errEl = document.getElementById('login-error');
-            errEl.style.display = 'none';
-
-            const user = document.getElementById('login-user').value;
-            const pass = document.getElementById('login-pass').value;
-
-            try {
-                await login(user, pass);
-                hideLogin();
-                startDashboard();
-            } catch (err) {
-                errEl.textContent = err.message;
-                errEl.style.display = 'block';
-            }
-        });
-    }
-
-    // =========================================================
-    // UTILITY
-    // =========================================================
-
-    function severityClass(severity) {
-        return `sev sev-${severity}`;
+    function truncate(str, max) {
+        if (!str) return '';
+        return str.length > max ? str.slice(0, max) + '...' : str;
     }
 
     function timeAgo(dateStr) {
+        const d = new Date(dateStr);
         const now = new Date();
-        const date = new Date(dateStr);
-        const diff = Math.floor((now - date) / 1000);
-
-        if (diff < 60) return `${diff}s ago`;
-        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-        if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-        return `${Math.floor(diff / 86400)}d ago`;
+        const diff = (now - d) / 1000;
+        if (diff < 60) return 'now';
+        if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+        if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+        return Math.floor(diff / 86400) + 'd ago';
     }
 
-    function truncate(str, max = 40) {
-        if (!str) return '';
-        return str.length > max ? str.substring(0, max) + '...' : str;
-    }
-
-    // =========================================================
-    // INIT
-    // =========================================================
-
-    async function startDashboard() {
-        initGrid();
+    // ── Show App ──
+    function showApp() {
+        document.getElementById('login-overlay').style.display = 'none';
+        document.getElementById('app').style.display = 'grid';
         mountWidgets();
-        initFilters();
-        await checkApiStatus();
-        await refreshAllWidgets();
-        await updateQuickStats();
+        checkApiStatus();
+        updateQuickStats();
 
         // Auto-refresh ogni 5 minuti
-        setInterval(() => {
-            refreshAllWidgets();
-            updateQuickStats();
-            checkApiStatus();
-        }, 300000);
+        _refreshTimer = setInterval(() => { refreshAll(); checkApiStatus(); }, 300000);
+
+        // Severity filter click handlers
+        document.querySelectorAll('#sev-filters .sev-filter').forEach(el => {
+            el.addEventListener('click', () => {
+                const cb = el.querySelector('input');
+                cb.checked = !cb.checked;
+                applyFilters();
+            });
+        });
     }
 
-    function init() {
-        initLoginForm();
-
-        // Button handlers
-        document.getElementById('btn-refresh')?.addEventListener('click', refreshAllWidgets);
-        document.getElementById('btn-reset-layout')?.addEventListener('click', resetLayout);
-        document.getElementById('btn-logout')?.addEventListener('click', logout);
-
-        if (isAuthenticated()) {
-            hideLogin();
-            startDashboard();
-        } else {
-            showLogin();
-        }
+    // ── Init ──
+    if (_token) {
+        showApp();
     }
 
-    // =========================================================
-    // PUBLIC API
-    // =========================================================
-
+    // ── Public API ──
     return {
-        init,
-        registerWidget,
-        refreshWidget,
-        refreshAllWidgets,
-        apiFetch,
-        severityClass,
-        timeAgo,
-        truncate,
-        state,
+        registerWidget, refreshWidget, refreshAll, resetLayout,
+        applyFilters, login, logout,
+        apiFetch, severityClass, truncate, timeAgo,
     };
-
 })();

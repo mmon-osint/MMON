@@ -1,18 +1,18 @@
 """
-MMON — Findings router: ingestione e query dei findings.
+MMON — Findings router: ingest da VM + query da dashboard.
 """
+from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.database import get_db
-from api.middleware.auth import authenticate_vm, get_current_user
-from models.db_models import Finding, User
-from models.schemas import (
+from ..database import get_db
+from ..middleware.auth import authenticate_vm, get_current_user
+from ...models.db_models import Finding, User
+from ...models.schemas import (
     FindingCategory,
     FindingCreate,
     FindingListResponse,
@@ -21,28 +21,21 @@ from models.schemas import (
     SourceVM,
 )
 
-router = APIRouter(prefix="/api/v1/findings", tags=["findings"])
+router = APIRouter(prefix="/findings", tags=["findings"])
 
 
-@router.post(
-    "",
-    response_model=FindingResponse,
-    status_code=status.HTTP_201_CREATED,
-)
+@router.post("/", status_code=status.HTTP_201_CREATED, response_model=FindingResponse)
 async def create_finding(
     body: FindingCreate,
     vm_name: str = Depends(authenticate_vm),
     db: AsyncSession = Depends(get_db),
 ) -> FindingResponse:
-    """
-    Ingestione di un nuovo finding da una VM.
-    Autenticazione via IP whitelist + header X-VM-Name.
-    """
-    # Verificare coerenza: la VM che chiama deve corrispondere a source_vm
+    """Ingest finding da VM. Auth via IP whitelist + X-VM-Name."""
+    # Consistenza: source_vm nel body deve matchare header
     if body.source_vm.value != vm_name:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"VM '{vm_name}' non può inserire findings per '{body.source_vm.value}'",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"source_vm '{body.source_vm.value}' non corrisponde a X-VM-Name '{vm_name}'",
         )
 
     finding = Finding(
@@ -53,79 +46,59 @@ async def create_finding(
         target_ref=body.target_ref,
         raw_data=body.raw_data,
         clean_data=body.clean_data,
-        sanitized=body.sanitized,
         tags=body.tags,
     )
-
     db.add(finding)
     await db.commit()
     await db.refresh(finding)
-
     return FindingResponse.model_validate(finding)
 
 
-@router.get("", response_model=FindingListResponse)
+@router.get("/", response_model=FindingListResponse)
 async def list_findings(
-    category: Optional[FindingCategory] = Query(None),
-    severity: Optional[FindingSeverity] = Query(None),
-    source_vm: Optional[SourceVM] = Query(None),
-    source_tool: Optional[str] = Query(None, max_length=64),
-    target_ref: Optional[str] = Query(None, max_length=512),
-    sanitized: Optional[bool] = Query(None),
-    date_from: Optional[datetime] = Query(None),
-    date_to: Optional[datetime] = Query(None),
+    category: FindingCategory | None = None,
+    severity: FindingSeverity | None = None,
+    source_vm: SourceVM | None = None,
+    source_tool: str | None = None,
+    target_ref: str | None = None,
+    sanitized: bool | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
+    page_size: int = Query(50, ge=1, le=200),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> FindingListResponse:
-    """
-    Query findings con filtri multipli e paginazione.
-    Richiede autenticazione JWT.
-    """
+    """Query findings con filtri. Auth via JWT."""
     query = select(Finding)
-    count_query = select(func.count(Finding.finding_id))
 
-    # Applicare filtri
     if category:
         query = query.where(Finding.category == category.value)
-        count_query = count_query.where(Finding.category == category.value)
     if severity:
         query = query.where(Finding.severity == severity.value)
-        count_query = count_query.where(Finding.severity == severity.value)
     if source_vm:
         query = query.where(Finding.source_vm == source_vm.value)
-        count_query = count_query.where(Finding.source_vm == source_vm.value)
     if source_tool:
         query = query.where(Finding.source_tool == source_tool)
-        count_query = count_query.where(Finding.source_tool == source_tool)
     if target_ref:
         query = query.where(Finding.target_ref.ilike(f"%{target_ref}%"))
-        count_query = count_query.where(Finding.target_ref.ilike(f"%{target_ref}%"))
     if sanitized is not None:
         query = query.where(Finding.sanitized == sanitized)
-        count_query = count_query.where(Finding.sanitized == sanitized)
     if date_from:
         query = query.where(Finding.created_at >= date_from)
-        count_query = count_query.where(Finding.created_at >= date_from)
     if date_to:
         query = query.where(Finding.created_at <= date_to)
-        count_query = count_query.where(Finding.created_at <= date_to)
 
     # Count totale
-    total_result = await db.execute(count_query)
+    count_q = select(func.count()).select_from(query.subquery())
+    total_result = await db.execute(count_q)
     total = total_result.scalar() or 0
 
-    # Paginazione e ordinamento
-    offset = (page - 1) * page_size
-    query = query.order_by(Finding.created_at.desc()).offset(offset).limit(page_size)
+    # Paginazione
+    query = query.order_by(Finding.created_at.desc())
+    query = query.offset((page - 1) * page_size).limit(page_size)
 
     result = await db.execute(query)
-    findings = result.scalars().all()
+    items = [FindingResponse.model_validate(f) for f in result.scalars().all()]
 
-    return FindingListResponse(
-        items=[FindingResponse.model_validate(f) for f in findings],
-        total=total,
-        page=page,
-        page_size=page_size,
-    )
+    return FindingListResponse(items=items, total=total, page=page, page_size=page_size)

@@ -1,16 +1,8 @@
 """
-MMON — VM1 Scheduler
-Orchestratore che legge mmon.conf e lancia tool OSINT in sequenza/parallelo.
-
-Modalità:
-    - Scan completo schedulato (intervallo da mmon.conf)
-    - Scan singolo tool (via job trigger dal backend)
-
-Esecuzione:
-    python -m engine.scheduler                    # loop continuo
-    python -m engine.scheduler --run-all          # scan singolo e uscita
-    python -m engine.scheduler --tool bbot        # singolo tool
+MMON VM1 — Scheduler / Orchestrator.
+Esegue scan plan basato su mmon.conf, gestisce concorrenza e loop.
 """
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -19,355 +11,229 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
-import httpx
 import structlog
 
-from tools import TOOL_REGISTRY, ToolResult, ToolWrapper
+from .tools import TOOL_REGISTRY
+from .tools.base import ToolResult, ToolWrapper
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
 class Scheduler:
-    """
-    Orchestratore scan VM1.
-    Legge configurazione, istanzia wrapper, esegue scan, gestisce risultati.
-    """
+    """Orchestratore scan VM1."""
 
-    def __init__(self, config_path: str = "/opt/mmon/config/mmon.conf"):
+    def __init__(self, config_path: str):
         self.config_path = config_path
-        self.config: dict[str, Any] = {}
-        self.api_base_url = "http://127.0.0.1:8000"
-        self.vm_name = "vm1"
-        self.scan_interval_hours = 24
-        self.max_concurrent = 3
-        self._running = True
-        self._load_config()
+        self.config = self._load_config()
+        self.backend_url = self._get_backend_url()
+        self.max_concurrent = int(self.config.get("scheduler", "max_concurrent_tools", fallback="3"))
+        self._shutdown = False
 
-    def _load_config(self) -> None:
-        """Carica configurazione da mmon.conf."""
-        parser = configparser.ConfigParser()
+    def _load_config(self) -> configparser.ConfigParser:
+        """Carica mmon.conf."""
+        cp = configparser.ConfigParser()
+        cp.read(self.config_path)
+        return cp
 
-        if Path(self.config_path).exists():
-            parser.read(self.config_path)
+    def _get_backend_url(self) -> str:
+        """Costruisci URL backend da config."""
+        ip = self.config.get("infrastructure", "backend_ip", fallback="127.0.0.1")
+        return f"http://{ip}:8000"
 
-            self.api_base_url = (
-                f"http://{parser.get('infrastructure', 'backend_ip', fallback='127.0.0.1')}:8000"
-            )
-            self.scan_interval_hours = parser.getint(
-                "scheduler", "scan_interval_hours", fallback=24
-            )
-            self.max_concurrent = parser.getint(
-                "scheduler", "max_concurrent_tools", fallback=3
-            )
+    def build_scan_plan(self) -> list[dict[str, Any]]:
+        """Costruisci piano di scan basato su target configurati."""
+        plan: list[dict[str, Any]] = []
 
-            # Config per i tool
-            self.config = {
-                "shodan_key": parser.get("api_keys", "shodan_key", fallback=""),
-                "domains": [
-                    d.strip()
-                    for d in parser.get("target", "domains", fallback="").split(",")
-                    if d.strip()
-                ],
-                "public_ips": [
-                    ip.strip()
-                    for ip in parser.get("target", "public_ips", fallback="").split(",")
-                    if ip.strip()
-                ],
-                "emails": [
-                    e.strip()
-                    for e in parser.get("target", "emails", fallback="").split(",")
-                    if e.strip()
-                ],
-                "usernames": [
-                    u.strip()
-                    for u in parser.get("social", "usernames", fallback="").split(",")
-                    if u.strip()
-                ],
-                "full_names": [
-                    n.strip()
-                    for n in parser.get("social", "full_names", fallback="").split(",")
-                    if n.strip()
-                ],
-                "company_name": parser.get("target", "company_name", fallback=""),
-                "industry": parser.get("sector", "industry", fallback=""),
-            }
-        else:
-            logger.warning("config_not_found", path=self.config_path)
+        domains = [d.strip() for d in self.config.get("target", "domains", fallback="").split(",") if d.strip()]
+        public_ips = [ip.strip() for ip in self.config.get("target", "public_ips", fallback="").split(",") if ip.strip()]
+        emails = [e.strip() for e in self.config.get("target", "emails", fallback="").split(",") if e.strip()]
+        usernames = [u.strip() for u in self.config.get("social", "usernames", fallback="").split(",") if u.strip()]
+        full_names = [n.strip() for n in self.config.get("social", "full_names", fallback="").split(",") if n.strip()]
+        company = self.config.get("target", "company_name", fallback="")
 
-    def _create_wrapper(self, tool_name: str) -> ToolWrapper:
-        """Istanzia un tool wrapper dal registry."""
-        wrapper_class = TOOL_REGISTRY.get(tool_name)
-        if wrapper_class is None:
-            raise ValueError(f"Tool '{tool_name}' non trovato nel registry")
-
-        return wrapper_class(
-            api_base_url=self.api_base_url,
-            vm_name=self.vm_name,
-            config=self.config,
-        )
-
-    # =============================================================
-    # SCAN PLAN
-    # =============================================================
-
-    def build_scan_plan(self) -> list[dict]:
-        """
-        Costruisce il piano di scan basato sulla configurazione.
-        Ogni entry è un dict con tool_name, target e kwargs.
-        """
-        plan = []
-
-        domains = self.config.get("domains", [])
-        emails = self.config.get("emails", [])
-        usernames = self.config.get("usernames", [])
-        public_ips = self.config.get("public_ips", [])
-        full_names = self.config.get("full_names", [])
-        company = self.config.get("company_name", "")
-
-        # bbot — scan per ogni dominio
+        # bbot: per ogni dominio
         for domain in domains:
-            plan.append({
-                "tool": "bbot",
-                "target": domain,
-                "kwargs": {"scan_type": "subdomain"},
-            })
+            plan.append({"tool": "bbot", "target": domain})
 
-        # mosint — scan per ogni email
+        # mosint: per ogni email
         for email in emails:
-            plan.append({
-                "tool": "mosint",
-                "target": email,
-            })
+            plan.append({"tool": "mosint", "target": email, "kwargs": {"scan_type": "email"}})
 
-        # h8mail — tutte le email insieme
-        if emails:
-            plan.append({
-                "tool": "h8mail",
-                "target": ",".join(emails),
-            })
+        # mosint: per ogni username
+        for username in usernames:
+            plan.append({"tool": "mosint", "target": username, "kwargs": {"scan_type": "username"}})
 
-        # maigret — scan per ogni username
-        if usernames:
-            plan.append({
-                "tool": "maigret",
-                "target": ",".join(usernames),
-            })
+        # shodan: per ogni IP pubblico
+        shodan_key = self.config.get("api_keys", "shodan", fallback="")
+        if shodan_key:
+            for ip in public_ips:
+                plan.append({"tool": "shodan", "target": ip, "kwargs": {"api_key": shodan_key}})
+            for domain in domains:
+                plan.append({"tool": "shodan", "target": domain, "kwargs": {"scan_type": "search", "api_key": shodan_key}})
 
-        # trufflehog — scan org GitHub se presente
+        # theHarvester: per ogni dominio
+        for domain in domains:
+            plan.append({"tool": "theharvester", "target": domain})
+
+        # trufflehog: se ci sono domini con possibili repo
         if company:
-            plan.append({
-                "tool": "trufflehog",
-                "target": company.lower().replace(" ", ""),
-                "kwargs": {"scan_type": "github_org"},
-            })
+            plan.append({"tool": "trufflehog", "target": company, "kwargs": {"scan_type": "github_org"}})
 
-        # shodan — scan per ogni IP
-        if public_ips and self.config.get("shodan_key"):
-            plan.append({
-                "tool": "shodan",
-                "target": ",".join(public_ips),
-            })
-
-        # spiderfoot — scan dominio principale
-        if domains:
-            plan.append({
-                "tool": "spiderfoot",
-                "target": domains[0],
-            })
-
-        # trape — tracking exposure per ogni dominio
+        # dorks: per ogni dominio
         for domain in domains:
-            plan.append({
-                "tool": "trape",
-                "target": domain,
-            })
+            plan.append({"tool": "dorks", "target": domain, "kwargs": {"names": full_names}})
 
-        # dorks — per ogni dominio con nomi
-        for domain in domains:
-            plan.append({
-                "tool": "dorks",
-                "target": domain,
-                "kwargs": {
-                    "names": full_names,
-                    "company": company,
-                },
-            })
-
-        logger.info("scan_plan_built", total_tasks=len(plan))
         return plan
 
-    # =============================================================
-    # ESECUZIONE
-    # =============================================================
-
-    async def run_single_tool(self, tool_name: str, target: str, **kwargs: Any) -> ToolResult:
-        """Esegue un singolo tool."""
-        wrapper = self._create_wrapper(tool_name)
-        try:
-            result = await wrapper.execute(target, **kwargs)
-            return result
-        finally:
-            await wrapper.close()
-
-    async def run_all(self) -> list[ToolResult]:
-        """Esegue scan completo — tutti i tool secondo il piano."""
-        plan = self.build_scan_plan()
-        results: list[ToolResult] = []
-
-        if not plan:
-            logger.warning("scan_plan_empty")
-            return results
-
-        logger.info("scan_start", total_tasks=len(plan))
-        start_time = time.monotonic()
-
-        # Eseguire in batch con concurrency limitata
+    async def run_plan(self, plan: list[dict[str, Any]]) -> list[ToolResult]:
+        """Esegui piano con concorrenza limitata."""
         semaphore = asyncio.Semaphore(self.max_concurrent)
+        results: list[ToolResult] = []
 
         async def run_task(task: dict) -> ToolResult:
             async with semaphore:
+                if self._shutdown:
+                    return ToolResult(success=False, error="Shutdown richiesto")
+
                 tool_name = task["tool"]
                 target = task["target"]
                 kwargs = task.get("kwargs", {})
-                return await self.run_single_tool(tool_name, target, **kwargs)
+
+                tool_cls = TOOL_REGISTRY.get(tool_name)
+                if not tool_cls:
+                    return ToolResult(success=False, error=f"Tool '{tool_name}' non registrato")
+
+                # Kwargs speciali per tool che richiedono parametri extra
+                init_kwargs: dict[str, Any] = {"backend_url": self.backend_url}
+                if "api_key" in kwargs:
+                    init_kwargs["api_key"] = kwargs.pop("api_key")
+
+                wrapper = tool_cls(**init_kwargs)
+                try:
+                    return await wrapper.execute(target, **kwargs)
+                finally:
+                    await wrapper.close()
 
         tasks = [run_task(t) for t in plan]
-        results = await asyncio.gather(*tasks, return_exceptions=False)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filtrare eccezioni in ToolResult falliti
-        clean_results = []
+        # Converti eccezioni in ToolResult
+        final: list[ToolResult] = []
         for r in results:
-            if isinstance(r, ToolResult):
-                clean_results.append(r)
-            elif isinstance(r, Exception):
-                clean_results.append(ToolResult(
-                    tool_name="unknown",
-                    success=False,
-                    error_message=str(r),
-                ))
+            if isinstance(r, Exception):
+                final.append(ToolResult(success=False, error=str(r)))
+            else:
+                final.append(r)
 
-        duration = time.monotonic() - start_time
-        total_findings = sum(r.findings_count for r in clean_results if r.success)
-        failed = sum(1 for r in clean_results if not r.success)
+        return final
 
-        logger.info(
-            "scan_complete",
-            duration=f"{duration:.1f}s",
-            total_findings=total_findings,
-            tools_ok=len(clean_results) - failed,
-            tools_failed=failed,
-        )
-
-        # Report
-        self._print_report(clean_results, duration)
-
-        return clean_results
-
-    def _print_report(self, results: list[ToolResult], duration: float) -> None:
-        """Stampa report finale dello scan."""
-        print("\n" + "=" * 60)
-        print("  MMON SCAN REPORT")
-        print("=" * 60)
-        print(f"  Duration: {duration:.1f}s")
-        print(f"  Tools: {len(results)}")
-        print("-" * 60)
-
-        for r in results:
-            status = "OK" if r.success else "FAIL"
-            icon = "+" if r.success else "!"
-            print(
-                f"  [{icon}] {r.tool_name:<16} "
-                f"{status:<6} "
-                f"{r.findings_count:>4} findings  "
-                f"{r.duration_seconds:.1f}s"
-            )
-            if r.error_message:
-                print(f"      Error: {r.error_message[:80]}")
-
-        total = sum(r.findings_count for r in results if r.success)
-        print("-" * 60)
-        print(f"  Total findings: {total}")
-        print("=" * 60 + "\n")
-
-    # =============================================================
-    # LOOP CONTINUO
-    # =============================================================
+    async def run_single_tool(self, tool_name: str, target: str, **kwargs: Any) -> ToolResult:
+        """Esegui un singolo tool."""
+        plan = [{"tool": tool_name, "target": target, "kwargs": kwargs}]
+        results = await self.run_plan(plan)
+        return results[0] if results else ToolResult(success=False, error="No result")
 
     async def run_loop(self) -> None:
-        """Loop continuo: scan → sleep → scan → ..."""
-        logger.info(
-            "scheduler_start",
-            interval_hours=self.scan_interval_hours,
-        )
+        """Loop continuo: scan → sleep → repeat."""
+        interval_h = int(self.config.get("scheduler", "scan_interval_hours", fallback="24"))
+        interval_s = interval_h * 3600
 
-        # Gestione signal per shutdown graceful
-        def handle_signal(sig, frame):
-            logger.info("scheduler_shutdown_signal")
-            self._running = False
+        logger.info("scheduler.loop_start", interval_hours=interval_h)
 
-        signal.signal(signal.SIGTERM, handle_signal)
-        signal.signal(signal.SIGINT, handle_signal)
+        while not self._shutdown:
+            plan = self.build_scan_plan()
+            logger.info("scheduler.cycle_start", tasks=len(plan))
 
-        while self._running:
-            try:
-                await self.run_all()
-            except Exception as e:
-                logger.error("scan_cycle_error", error=str(e))
+            start = time.perf_counter()
+            results = await self.run_plan(plan)
+            duration = time.perf_counter() - start
 
-            # Sleep con check periodico per shutdown
-            sleep_seconds = self.scan_interval_hours * 3600
-            logger.info("scheduler_sleep", next_scan_in=f"{self.scan_interval_hours}h")
+            # Report
+            success = sum(1 for r in results if r.success)
+            total_findings = sum(r.findings_count for r in results)
+            logger.info(
+                "scheduler.cycle_complete",
+                total=len(results), success=success, failed=len(results) - success,
+                findings=total_findings, duration_min=round(duration / 60, 1),
+            )
 
-            slept = 0
-            while slept < sleep_seconds and self._running:
-                await asyncio.sleep(min(60, sleep_seconds - slept))
-                slept += 60
+            # Sleep fino al prossimo ciclo
+            logger.info("scheduler.sleeping", next_run_hours=interval_h)
+            for _ in range(interval_s):
+                if self._shutdown:
+                    break
+                await asyncio.sleep(1)
 
-        logger.info("scheduler_stopped")
+    def shutdown(self) -> None:
+        """Segnala shutdown graceful."""
+        logger.info("scheduler.shutdown_requested")
+        self._shutdown = True
 
 
-# =============================================================
-# ENTRYPOINT
-# =============================================================
+def _print_report(results: list[ToolResult], plan: list[dict]) -> None:
+    """Stampa report formattato dei risultati."""
+    print("\n" + "=" * 60)
+    print("  MMON — Scan Report")
+    print("=" * 60)
 
-def main() -> None:
+    for i, (task, result) in enumerate(zip(plan, results)):
+        status = "✓" if result.success else "✗"
+        tool = task["tool"]
+        target = task["target"][:30]
+        findings = result.findings_count
+        duration = f"{result.duration_seconds:.1f}s"
+        error = f" — {result.error[:40]}" if result.error else ""
+
+        print(f"  {status} {tool:15} {target:30} {findings:3} findings  {duration:>8}{error}")
+
+    total_ok = sum(1 for r in results if r.success)
+    total_findings = sum(r.findings_count for r in results)
+    print(f"\n  Total: {total_ok}/{len(results)} success, {total_findings} findings")
+    print("=" * 60 + "\n")
+
+
+async def main() -> None:
     parser = argparse.ArgumentParser(description="MMON VM1 Scheduler")
-    parser.add_argument(
-        "--config",
-        default=os.environ.get("MMON_CONFIG", "/opt/mmon/config/mmon.conf"),
-        help="Path a mmon.conf",
-    )
-    parser.add_argument("--run-all", action="store_true", help="Scan singolo e uscita")
-    parser.add_argument("--tool", help="Esegui singolo tool")
-    parser.add_argument("--target", help="Target per singolo tool")
-
+    parser.add_argument("--run-all", action="store_true", help="Singolo ciclo scan completo")
+    parser.add_argument("--tool", type=str, help="Esegui solo un tool specifico")
+    parser.add_argument("--target", type=str, help="Target per --tool")
+    parser.add_argument("--loop", action="store_true", help="Loop continuo")
     args = parser.parse_args()
 
-    scheduler = Scheduler(config_path=args.config)
+    config_path = os.environ.get("MMON_CONFIG", "/opt/mmon/config/mmon.conf")
+    scheduler = Scheduler(config_path)
+
+    # Signal handling
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, scheduler.shutdown)
 
     if args.tool:
-        target = args.target
+        target = args.target or ""
         if not target:
-            # Usa primo target disponibile dalla config
-            domains = scheduler.config.get("domains", [])
-            target = domains[0] if domains else "example.com"
-        result = asyncio.run(scheduler.run_single_tool(args.tool, target))
-        print(f"\n{args.tool}: {'OK' if result.success else 'FAIL'} — "
-              f"{result.findings_count} findings in {result.duration_seconds:.1f}s")
-        sys.exit(0 if result.success else 1)
+            print("Errore: --target richiesto con --tool")
+            sys.exit(1)
+        result = await scheduler.run_single_tool(args.tool, target)
+        print(f"{'✓' if result.success else '✗'} {args.tool}: {result.findings_count} findings ({result.duration_seconds:.1f}s)")
+        if result.error:
+            print(f"  Error: {result.error}")
 
-    elif args.run_all:
-        results = asyncio.run(scheduler.run_all())
-        failed = any(not r.success for r in results)
-        sys.exit(1 if failed else 0)
+    elif args.loop:
+        await scheduler.run_loop()
 
     else:
-        asyncio.run(scheduler.run_loop())
+        # Default: singolo ciclo
+        plan = scheduler.build_scan_plan()
+        if not plan:
+            print("Nessun target configurato. Esegui il wizard prima.")
+            sys.exit(1)
+
+        logger.info("scheduler.single_run", tasks=len(plan))
+        results = await scheduler.run_plan(plan)
+        _print_report(results, plan)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,130 +1,133 @@
 """
-MMON — mosint wrapper
-Email OSINT + breach check.
-
-mosint è un tool Go che raccoglie informazioni su un indirizzo email:
-breach check, social lookup, DNS verification, domain info.
-
-Docs: https://github.com/alpkeskin/mosint
+MMON VM1 — mosint Wrapper
+Email OSINT, breach detection, credential leak, username/social tracking.
+Finding categories: social, leak
 """
+from __future__ import annotations
 
 import json
 from typing import Any
 
-from .base import (
-    FindingCategory,
-    FindingPayload,
-    FindingSeverity,
-    ToolWrapper,
-)
+from .base import FindingPayload, ToolWrapper
 
 
 class MosintWrapper(ToolWrapper):
-    """Wrapper per mosint — Email OSINT e breach check."""
+    """
+    Wrapper per mosint v3 — copre:
+    - Email OSINT + breach detection
+    - Credential leak
+    - Username / social tracking
+    """
 
-    tool_name = "mosint"
-    category = FindingCategory.LEAK
-    default_timeout = 120
+    name = "mosint"
+    timeout = 300
 
     async def run(self, target: str, **kwargs: Any) -> dict:
-        """
-        Esegue mosint su un indirizzo email.
+        """Esegui mosint su email o username."""
+        scan_type = kwargs.get("scan_type", "email")  # email | username
 
-        Args:
-            target: Indirizzo email da analizzare
-        """
-        cmd = ["mosint", target, "-o", "json"]
+        if scan_type == "email":
+            cmd = ["mosint", target, "--json"]
+        else:
+            # mosint v3 supporta lookup per username
+            cmd = ["mosint", target, "--json"]
 
-        returncode, stdout, stderr = await self.run_command(cmd)
+        stdout, stderr, rc = await self.run_command(cmd)
 
-        results = {
-            "target": target,
-            "breaches": [],
-            "social": [],
-            "dns_info": {},
-            "raw_stdout": stdout,
-        }
-
-        # mosint restituisce JSON su stdout
         try:
             data = json.loads(stdout)
-            results.update(data)
         except json.JSONDecodeError:
-            # Fallback: parsare output testuale
-            for line in stdout.splitlines():
-                line = line.strip()
-                if "breach" in line.lower() or "leak" in line.lower():
-                    results["breaches"].append({"raw": line})
-                elif "social" in line.lower() or "http" in line.lower():
-                    results["social"].append({"raw": line})
+            data = {"raw_stdout": stdout, "target": target}
 
-        return results
+        data["_target"] = target
+        data["_scan_type"] = scan_type
+        return data
 
     def parse_output(self, raw: dict) -> list[FindingPayload]:
-        """Converte output mosint in FindingPayload."""
-        findings = []
-        target = raw.get("target", "unknown")
+        """Parsa output mosint in findings social + leak."""
+        findings: list[FindingPayload] = []
+        target = raw.get("_target", "")
 
-        # Breach trovati
-        for breach in raw.get("breaches", []):
-            breach_name = breach.get("name", breach.get("raw", "unknown"))
+        # ── Breach / Leak findings ──
+        breaches = raw.get("breaches", raw.get("data_breaches", []))
+        if isinstance(breaches, list):
+            for breach in breaches:
+                name = breach if isinstance(breach, str) else breach.get("name", str(breach))
+                has_password = False
+                if isinstance(breach, dict):
+                    has_password = breach.get("password", False) or breach.get("has_password", False)
+
+                findings.append(FindingPayload(
+                    source_tool=self.name,
+                    category="leak",
+                    severity="critical" if has_password else "high",
+                    target_ref=target,
+                    raw_data=breach if isinstance(breach, dict) else {"breach": name},
+                    clean_data={
+                        "breach_name": name,
+                        "has_password": has_password,
+                        "email": target,
+                    },
+                    tags=["breach", "leak"] + (["credential"] if has_password else []),
+                ))
+
+        # ── Social account findings ──
+        socials = raw.get("social", raw.get("social_media", raw.get("accounts", [])))
+        if isinstance(socials, list):
+            for account in socials:
+                if isinstance(account, dict):
+                    platform = account.get("platform", account.get("site", "unknown"))
+                    url = account.get("url", account.get("link", ""))
+                    username = account.get("username", target)
+                else:
+                    platform = str(account)
+                    url = ""
+                    username = target
+
+                findings.append(FindingPayload(
+                    source_tool=self.name,
+                    category="social",
+                    severity="info",
+                    target_ref=target,
+                    raw_data=account if isinstance(account, dict) else {"platform": platform},
+                    clean_data={
+                        "platform": platform,
+                        "username": username,
+                        "profile_url": url,
+                    },
+                    tags=["social", "account"],
+                ))
+
+        # ── DNS / Domain info ──
+        dns = raw.get("dns", raw.get("domain_info", {}))
+        if isinstance(dns, dict) and dns:
             findings.append(FindingPayload(
-                source_tool=self.tool_name,
-                category=FindingCategory.LEAK.value,
-                severity=FindingSeverity.HIGH.value,
+                source_tool=self.name,
+                category="infrastructure",
+                severity="info",
                 target_ref=target,
-                raw_data=breach,
+                raw_data=dns,
                 clean_data={
-                    "breach_name": breach_name,
-                    "email": target,
-                    "date": breach.get("date", ""),
-                    "data_types": breach.get("data_types", []),
+                    "type": "email_domain_info",
+                    "domain": target.split("@")[-1] if "@" in target else target,
+                    "records": dns,
                 },
-                tags=["breach", "email", "leak"],
+                tags=["dns", "email_domain"],
             ))
 
-        # Account social trovati
-        for social in raw.get("social", []):
-            platform = social.get("platform", social.get("raw", ""))
-            findings.append(FindingPayload(
-                source_tool=self.tool_name,
-                category=FindingCategory.SOCIAL.value,
-                severity=FindingSeverity.INFO.value,
-                target_ref=target,
-                raw_data=social,
-                clean_data={
-                    "platform": platform,
-                    "username": target.split("@")[0],
-                    "profile_url": social.get("url", ""),
-                    "status": "found",
-                },
-                tags=["social", "email"],
-            ))
-
-        # Se nessun breach trovato, creare finding info
-        if not raw.get("breaches"):
-            findings.append(FindingPayload(
-                source_tool=self.tool_name,
-                category=FindingCategory.LEAK.value,
-                severity=FindingSeverity.INFO.value,
-                target_ref=target,
-                raw_data={"note": "nessun breach trovato"},
-                clean_data={"email": target, "breach_name": "none"},
-                tags=["email", "clean"],
-            ))
+        # ── Related emails ──
+        related = raw.get("related_emails", raw.get("related", []))
+        if isinstance(related, list):
+            for email in related:
+                email_str = email if isinstance(email, str) else email.get("email", str(email))
+                findings.append(FindingPayload(
+                    source_tool=self.name,
+                    category="social",
+                    severity="low",
+                    target_ref=target,
+                    raw_data={"related_email": email_str},
+                    clean_data={"type": "related_email", "email": email_str},
+                    tags=["email", "related"],
+                ))
 
         return findings
-
-
-if __name__ == "__main__":
-    import argparse
-    import asyncio
-
-    parser = argparse.ArgumentParser(description="MMON mosint wrapper")
-    parser.add_argument("--target", required=True, help="Email target")
-    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
-    args = parser.parse_args()
-
-    wrapper = MosintWrapper(api_base_url=args.api_url)
-    result = asyncio.run(wrapper.execute(args.target))
-    print(f"Completato: {result.findings_count} findings in {result.duration_seconds:.1f}s")

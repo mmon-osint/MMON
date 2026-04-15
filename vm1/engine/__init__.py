@@ -1,1 +1,1 @@
-"""MMON VM1 — Clearnet Engine."""
+"""MMON VM1 Clearnet Engine."""

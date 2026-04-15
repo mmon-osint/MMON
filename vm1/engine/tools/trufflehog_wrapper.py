@@ -1,129 +1,96 @@
 """
-MMON — trufflehog wrapper
-Secret/token leak detection su repository pubblici e org GitHub.
-
-Docs: https://github.com/trufflesecurity/trufflehog
+MMON VM1 — trufflehog Wrapper
+Secret/token leak detection in Git repos, S3, GitHub orgs.
+Finding category: keyword
 """
+from __future__ import annotations
 
 import json
 from typing import Any
 
-from .base import (
-    FindingCategory,
-    FindingPayload,
-    FindingSeverity,
-    ToolWrapper,
-)
+from .base import FindingPayload, ToolWrapper
 
 
 class TrufflehogWrapper(ToolWrapper):
-    """Wrapper per trufflehog — secret e token leak su repo pubblici."""
+    """Wrapper per trufflehog v3 — secret detection."""
 
-    tool_name = "trufflehog"
-    category = FindingCategory.LEAK
-    default_timeout = 600
+    name = "trufflehog"
+    timeout = 600
 
     async def run(self, target: str, **kwargs: Any) -> dict:
-        """
-        Esegue trufflehog scan.
-
-        Args:
-            target: URL repo git, org GitHub, o dominio
-            scan_type: "github_org", "git_repo", "s3". Default: "github_org"
-        """
-        scan_type = kwargs.get("scan_type", "github_org")
+        """Esegui trufflehog su target (git repo, github org, s3)."""
+        scan_type = kwargs.get("scan_type", "git_repo")
 
         cmd = ["trufflehog", "--json", "--no-update"]
 
         if scan_type == "github_org":
-            cmd.extend(["github", "--org", target])
+            cmd += ["github", "--org", target]
         elif scan_type == "git_repo":
-            cmd.extend(["git", target])
+            cmd += ["git", target]
         elif scan_type == "s3":
-            cmd.extend(["s3", "--bucket", target])
+            cmd += ["s3", "--bucket", target]
         else:
-            cmd.extend(["github", "--org", target])
+            cmd += ["git", target]
 
-        returncode, stdout, stderr = await self.run_command(cmd)
+        stdout, stderr, rc = await self.run_command(cmd)
 
-        results = {
-            "target": target,
-            "scan_type": scan_type,
-            "secrets": [],
-        }
-
-        # trufflehog restituisce JSON line-by-line su stdout
+        # trufflehog produce un JSON per riga
+        results = []
         for line in stdout.splitlines():
             line = line.strip()
-            if not line:
-                continue
-            try:
-                secret = json.loads(line)
-                results["secrets"].append(secret)
-            except json.JSONDecodeError:
-                continue
+            if line and line.startswith("{"):
+                try:
+                    results.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
 
-        return results
+        return {"results": results, "target": target, "scan_type": scan_type}
 
     def parse_output(self, raw: dict) -> list[FindingPayload]:
-        """Converte output trufflehog in FindingPayload."""
-        findings = []
-        target = raw.get("target", "unknown")
+        """Parsa risultati trufflehog in findings."""
+        findings: list[FindingPayload] = []
+        target = raw.get("target", "")
 
-        for secret in raw.get("secrets", []):
-            detector = secret.get("DetectorName", secret.get("detectorName", "unknown"))
-            verified = secret.get("Verified", secret.get("verified", False))
+        for result in raw.get("results", []):
+            detector = result.get("DetectorName", result.get("SourceMetadata", {}).get("DetectorName", "unknown"))
+            verified = result.get("Verified", False)
+            raw_secret = result.get("Raw", "")
 
-            severity = FindingSeverity.CRITICAL.value if verified else FindingSeverity.HIGH.value
+            # MASCHERA secret — mai memorizzare in chiaro
+            masked = _mask_secret(raw_secret)
 
-            # Estrarre info dal source metadata
-            source_meta = secret.get("SourceMetadata", secret.get("sourceMetadata", {}))
-            data = source_meta.get("Data", source_meta.get("data", {}))
-            github_data = data.get("Github", data.get("github", {}))
+            source_meta = result.get("SourceMetadata", {})
+            file_path = source_meta.get("Data", {}).get("Filesystem", {}).get("file", "")
+            commit = source_meta.get("Data", {}).get("Git", {}).get("commit", "")
 
-            repo = github_data.get("repository", "")
-            file_path = github_data.get("file", "")
-            commit = github_data.get("commit", "")
-
-            # Mascherare il secret effettivo (non salvare in chiaro)
-            raw_secret = secret.get("Raw", secret.get("raw", ""))
-            masked = raw_secret[:4] + "****" if len(raw_secret) > 4 else "****"
+            severity = "critical" if verified else "high"
 
             findings.append(FindingPayload(
-                source_tool=self.tool_name,
-                category=FindingCategory.LEAK.value,
+                source_tool=self.name,
+                category="keyword",
                 severity=severity,
                 target_ref=target,
                 raw_data={
                     "detector": detector,
                     "verified": verified,
-                    "repo": repo,
                     "file": file_path,
-                    "commit": commit[:12],
+                    "commit": commit[:12] if commit else "",
                 },
                 clean_data={
-                    "secret_type": detector,
+                    "type": "secret_leak",
+                    "detector": detector,
                     "verified": verified,
-                    "masked_value": masked,
-                    "repository": repo,
+                    "masked_secret": masked,
                     "file_path": file_path,
                 },
-                tags=["secret", "leak", detector.lower(), "verified" if verified else "unverified"],
+                tags=["secret", "leak", detector.lower()] + (["verified"] if verified else []),
             ))
 
         return findings
 
 
-if __name__ == "__main__":
-    import argparse
-    import asyncio
-
-    parser = argparse.ArgumentParser(description="MMON trufflehog wrapper")
-    parser.add_argument("--target", required=True, help="GitHub org o repo URL")
-    parser.add_argument("--scan-type", default="github_org", choices=["github_org", "git_repo", "s3"])
-    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
-    args = parser.parse_args()
-
-    wrapper = TrufflehogWrapper(api_base_url=args.api_url)
-    result = asyncio.run(wrapper.execute(args.target, scan_type=args.scan_type))
-    print(f"Completato: {result.findings_count} secret trovati")
+def _mask_secret(secret: str) -> str:
+    """Maschera un secret: mostra solo primi 4 caratteri."""
+    if not secret or len(secret) < 5:
+        return "****"
+    return secret[:4] + "****" + ("" if len(secret) < 12 else f" ({len(secret)} chars)")

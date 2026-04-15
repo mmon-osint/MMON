@@ -1,107 +1,91 @@
 # MMON — Progress Tracker
-> Ultimo aggiornamento: 2026-03-28
+
+> Generato automaticamente. Aggiornato ad ogni milestone completata.
+
+## Stato Generale
+
+| Milestone | Stato | Data |
+|-----------|-------|------|
+| M1 — Scaffold + Provisioning | [x] | 2026-04-15 |
+| M2 — Setup Wizard PHP | [x] | 2026-04-15 |
+| M3 — FastAPI Backend | [x] | 2026-04-15 |
+| M4 — VM1 Tool Wrappers | [x] | 2026-04-15 |
+| M5 — Dashboard v1 | [x] | 2026-04-15 |
 
 ---
 
-## Legenda stati
-- [x] Completato
-- [~] In corso
-- [ ] Da fare
-- [!] Bloccato / problema
+## M1 — Scaffold + Provisioning
 
----
+- [x] 1.1 Script `setup_backend.sh` (VM0: Python 3.12, FastAPI, PostgreSQL 16, Redis 7, Apache2, PHP 8.x, Ollama)
+- [x] 1.2 Script `setup_vm1.sh` (VM1: Python 3.12, venv, bbot, mosint, trufflehog, shodan, theHarvester, systemd)
+- [x] 1.3 Script `setup_vm2.sh` (VM2: scaffold — Python 3.12, Tor, nftables kill switch, engine scaffold)
+- [x] 1.4 Script `setup_vm3.sh` (VM3: scaffold — Python 3.12, Telethon, nftables Telegram-only, engine scaffold)
+- [x] 1.5 Schema DB `init_db.sql` (PostgreSQL 16 — 6 tabelle, ENUM, indici GIN, trigger)
+- [x] 1.6 Config template `mmon.conf.example` (con sezione Keycloak)
+- [x] 1.7 `.gitignore` + `README.md`
 
-## M1 — Scaffold + Provisioning (Settimana 1)
+## M2 — Setup Wizard PHP
 
-- [x] 1.1 Struttura filesystem `/opt/mmon/` nel repo
-- [x] 1.2 `setup_backend.sh` — Python 3.12, PostgreSQL 16, Redis 7, Nginx, PHP 8.x, Ollama
-- [x] 1.3 `setup_vm1.sh` — Python 3.12, venv, dipendenze tool OSINT
-- [x] 1.4 Unit file systemd per `mmon-api`, `mmon-clearnet-engine`, `mmon-scheduler` (inclusi nei setup scripts)
-- [x] 1.5 Schema SQL iniziale PostgreSQL (findings, targets, config, users, jobs, audit_log)
-- [x] 1.6 `setup_vm2.sh` e `setup_vm3.sh` — scaffold + Tor/nftables/Telethon
-- [x] 1.7 README con istruzioni setup e pre-requisiti
+- [x] 2.1 Router `wizard/index.php`
+- [x] 2.2 Shared functions `wizard/includes/functions.php`
+- [x] 2.3 Step 1: Modalità (Personal/Company con Keycloak)
+- [x] 2.4 Step 2: Target (domini, IP, email)
+- [x] 2.5 Step 3: Social (username, nominativi)
+- [x] 2.6 Step 4: Tecnologie (8 categorie, chip selezionabili)
+- [x] 2.7 Step 5: Settore/Prodotti/Competitor
+- [x] 2.8 Step 6: API Keys (con test button JS)
+- [x] 2.9 Step 7: Infrastruttura (IP VM, Tor, Telegram, Keycloak condizionale)
+- [x] 2.10 Step 8: Summary + conferma + genera mmon.conf + init DB
+- [x] 2.11 CSS cyberpunk theme
 
-## M2 — Setup Wizard PHP (Settimana 2)
+## M3 — FastAPI Backend
 
-- [x] 2.1 Nginx config per servire wizard PHP su `:8080/wizard` (inclusa in setup_backend.sh)
-- [x] 2.2 Step 1 — Selezione modalità Personal / Company
-- [x] 2.3 Step 2 — Dati target (nome azienda, domini, IP, email)
-- [x] 2.4 Step 3 — Username e nominativi da monitorare
-- [x] 2.5 Step 4 — Tecnologie utilizzate (CVE feed)
-- [x] 2.6 Step 5 — Settore e prodotti (Competitors)
-- [x] 2.7 Step 6 — API keys opzionali (Shodan, Criminal IP, Quake360) con test connessione
-- [x] 2.8 Step 7 — IP delle 3 VM + config Tor/Telegram
-- [x] 2.9 Generazione `mmon.conf` + inizializzazione DB (in complete.php)
-- [x] 2.10 Pagina riepilogo + redirect dashboard
-- [x] 2.11 Lock wizard dopo primo setup (file .wizard_completed)
+- [x] 3.1 Config loader (`config.py`) — INI parser + Pydantic Settings + Keycloak
+- [x] 3.2 Database async (`database.py`) — asyncpg + session factory
+- [x] 3.3 ORM models (`db_models.py`) — 6 tabelle, UUID, JSONB, ARRAY
+- [x] 3.4 Pydantic schemas (`schemas.py`) — 9 categorie finding, widget VM1+VM2+VM3
+- [x] 3.5 Auth middleware (JWT + VM IP whitelist + require_role)
+- [x] 3.6 Router auth (`/auth/login`, `/auth/me`, `/auth/setup-password`)
+- [x] 3.7 Router findings (`POST /findings` VM auth, `GET /findings` JWT + 8 filtri)
+- [x] 3.8 Router widgets (12 endpoint: social, infra, cve, keywords, competitors, status, bad-actors, criminal-forums, alerts, telegram-status, monitored-channels)
+- [x] 3.9 Router jobs (`POST trigger`, `GET status`, `POST cancel` — ALLOWED_TOOLS per VM)
+- [x] 3.10 Main app (`main.py` — rate limiter, CORS, logging, test-apikey)
+- [x] 3.11 Test suite (12 test cases — schema validation + injection prevention)
 
-## M3 — FastAPI Backend (Settimane 3-4)
+## M4 — VM1 Tool Wrappers
 
-- [x] 3.1 Scaffold FastAPI + Uvicorn + config loader (api/main.py, api/config.py, api/database.py)
-- [x] 3.2 Modelli SQLAlchemy/Pydantic (models/db_models.py, models/schemas.py)
-- [x] 3.3 Auth JWT — login, token, middleware, role-based, VM auth (api/middleware/auth.py, routers/auth.py)
-- [x] 3.4 `POST /api/v1/findings` — ingestione finding con validazione schema
-- [x] 3.5 `GET /api/v1/findings` — query con filtri multipli + paginazione
-- [x] 3.6 Rate limiting (slowapi 100/min) + input sanitization + content-type check
-- [x] 3.7 `GET /api/v1/widgets/social-footprint`
-- [x] 3.8 `GET /api/v1/widgets/infrastructure`
-- [x] 3.9 `GET /api/v1/widgets/cve-feed`
-- [x] 3.10 `GET /api/v1/widgets/keywords`
-- [x] 3.11 `GET /api/v1/widgets/competitors`
-- [x] 3.12 `POST /api/v1/jobs/trigger` con validazione tool + conflict check
-- [x] 3.13 `GET /api/v1/jobs/status` + `POST /jobs/{id}/cancel`
-- [x] 3.14 Systemd unit `mmon-api.service` (già in setup_backend.sh)
-- [x] 3.15 Test suite pytest (tests/test_api.py — health, auth, findings, widgets, jobs, schemas)
+- [x] 4.1 Base wrapper astratto (`base.py` — retry, submit, subprocess sicuro)
+- [x] 4.2 `bbot_wrapper.py` (subdomain/attack surface → infrastructure)
+- [x] 4.3 `mosint_wrapper.py` (email+breach+credential+social → social, leak)
+- [x] 4.4 `trufflehog_wrapper.py` (secret/token leak → keyword, MASCHERA secrets)
+- [x] 4.5 `shodan_wrapper.py` (infra scan + CVE → infrastructure, cve)
+- [x] 4.6 `theharvester_wrapper.py` (multi-source OSINT → social, infrastructure)
+- [x] 4.7 `dorks_wrapper.py` (DuckDuckGo, 5 categorie dork, rate limit 3-8s)
+- [x] 4.8 Tool registry `__init__.py` (6 tool)
+- [x] 4.9 Scheduler/orchestrator (`scheduler.py` — scan plan, concorrenza, loop, signal handling)
 
-## M4 — VM1 Tool Wrapper (Settimane 5-6)
+## M5 — Dashboard v1
 
-- [x] 4.1 Base class `ToolWrapper` — run_command sicuro, retry, submit finding, temp dir
-- [x] 4.2 Wrapper bbot — subdomain enum, IP discovery, port severity mapping
-- [x] 4.3 Wrapper mosint — email OSINT, breach check, social lookup
-- [x] 4.4 Wrapper h8mail — credential leak con JSON output parsing
-- [x] 4.5 Wrapper maigret — username tracking multi-piattaforma
-- [x] 4.6 Wrapper trufflehog — secret detection su GitHub org/repo, masked output
-- [x] 4.7 Wrapper spiderfoot — OSINT multi-source con event type mapping
-- [x] 4.8 Wrapper trape — tracking exposure analysis
-- [x] 4.9 Wrapper Shodan API — host/search/dns, CVE extraction
-- [x] 4.10 Custom scraper Google Dorks — DuckDuckGo, 5 categorie dork, anti-ban
-- [x] 4.11 `scheduler.py` — orchestratore con scan plan, concurrency, loop, report
-- [x] 4.12 Systemd unit engine + scheduler (già in setup_vm1.sh)
-- [x] 4.13 Error handling e retry logic (in base.py — max_retries, exponential backoff)
-
-## M5 — Dashboard v1 (Settimane 7-8)
-
-- [x] 5.1 Layout base HTML/CSS cyberpunk (dashboard.css — tema dark, neon, grid layout, severity badges)
-- [x] 5.2 `widget-engine.js` — caricamento modulare widget (IIFE, auth JWT, apiFetch, lifecycle)
-- [x] 5.3 Sistema drag & resize (GridStack 12 colonne, 80px cellHeight, salvataggio posizioni)
-- [x] 5.4 Widget SOCIAL FOOTPRINT (card-grid per piattaforma, raggruppamento per username)
-- [x] 5.5 Widget INFRASTRUCTURE EXPOSURE (tabella asset/type/details/severity, severity summary bar)
-- [x] 5.6 Integrazione HTMX (incluso in index.html, disponibile per widget futuri)
-- [x] 5.7 Widget CVE FEED (tabella CVE con CVSS color coding, link NVD, severity mapping)
-- [x] 5.8 Widget KEYWORDS (tabella keyword hits, frequency summary, source links)
-- [x] 5.9 Widget COMPETITORS (card-grid raggruppato per competitor, severity breakdown)
-- [x] 5.10 Sidebar navigazione + filtri (severity toggle, VM select, date range, quick stats)
-- [x] 5.11 Salvataggio layout localStorage (save/load/reset in widget-engine.js)
-- [x] 5.12 Responsive base (1024px+ — sidebar hidden sotto 1024px)
-- [x] 5.13 Nginx config dashboard + proxy FastAPI (config/nginx-dashboard.conf, SSL, security headers)
-- [ ] 5.14 Smoke test end-to-end
-- [ ] 5.15 Fix bug + polish UI
+- [x] 5.1 Layout HTML/CSS cyberpunk (dashboard.css — OpenCTI-inspired)
+- [x] 5.2 `widget-engine.js` (IIFE, auth JWT, GridStack 12col, filtri, auto-refresh 5min)
+- [x] 5.3 Widget: SOCIAL FOOTPRINT (card-grid per piattaforma/username)
+- [x] 5.4 Widget: INFRASTRUCTURE EXPOSURE (tabella + severity bar)
+- [x] 5.5 Widget: CVE FEED (tabella CVE + CVSS + link NVD)
+- [x] 5.6 Widget: KEYWORDS (tabella + frequency summary)
+- [x] 5.7 Widget: COMPETITORS (card-grid raggruppato per competitor)
+- [x] 5.8 Widget: STATUS (VM status grid + Tor + last crawl + total findings)
+- [x] 5.9 Widget: TOP ACTIVE BAD ACTORS (tabella attori + threat level)
+- [x] 5.10 Widget: TOP ACTIVE CRIMINAL FORUMS (card list + status + mentions)
+- [x] 5.11 Widget: ALERTS (tabella deep web alerts + matched text)
+- [x] 5.12 Widget: TELEGRAM STATUS (status circle + channels count)
+- [x] 5.13 Widget: MONITORED CHANNELS (card list + messages count)
+- [x] 5.14 Apache2 config (`apache-mmon.conf` — SSL, proxy, PHP-FPM, SPA fallback)
+- [ ] 5.15 Smoke test end-to-end
 
 ---
 
 ## Note e decisioni
 
 | Data | Nota |
-|---|---|
-| 2026-03-28 | Progetto iniziato. Creata struttura repo e PROGRESS.md |
-| 2026-03-28 | M1 COMPLETATA: scaffold filesystem, 4 script provisioning, schema SQL, unit systemd, README |
-| 2026-03-28 | M2 COMPLETATA: wizard PHP 7 step + riepilogo + generazione mmon.conf + init DB + lock + CSS cyberpunk |
-| 2026-03-28 | M3 COMPLETATA: FastAPI backend completo — config, DB, auth JWT, findings CRUD, 5 widget endpoint, jobs, rate limit, test suite |
-| 2026-03-28 | M4 COMPLETATA: 9 tool wrapper (bbot, mosint, h8mail, maigret, trufflehog, shodan, spiderfoot, trape, dorks) + scheduler + registry |
-| 2026-03-28 | M5 QUASI COMPLETATA: dashboard cyberpunk (HTML/CSS/JS), widget-engine, 5 widget, filtri sidebar, GridStack, Nginx config. Manca smoke test + polish |
-
----
-
-## Problemi aperti
-
-_Nessuno al momento._
+|------|------|
+| 2026-04-15 | Rebuild completo allineato a prompt v2: Debian 12, Apache2, tool consolidati VM1, Keycloak Company, widget VM2/VM3 |

@@ -1,50 +1,61 @@
-# MMON Configuration File
-# Generato automaticamente dal Setup Wizard
-# NON modificare manualmente a meno che tu sappia cosa stai facendo.
-# NON committare questo file nel repository (contiene secret).
+; ─────────────────────────────────────────────────────────────
+; MMON Configuration — generato dal Setup Wizard
+; NON COMMITTARE IN REPO — contiene secret
+; ─────────────────────────────────────────────────────────────
 
 [general]
-mode = personal
-# mode = company
+deploy_mode = personal          ; personal | company
+instance_name = MMON
+version = 1.0.0
 
 [target]
-company_name = Example Corp
-domains = example.com,example.org
-public_ips = 203.0.113.10,203.0.113.11
-emails = info@example.com,admin@example.com
+company_name =
+domains =                       ; comma-separated: example.com,sub.example.com
+public_ips =                    ; comma-separated: 1.2.3.4,5.6.7.8
+emails =                        ; comma-separated: admin@example.com,ceo@example.com
 
 [social]
-usernames = johndoe,janedoe
-full_names = John Doe,Jane Doe
+usernames =                     ; comma-separated: johndoe,janedoe
+full_names =                    ; comma-separated: John Doe,Jane Doe
 
 [technologies]
-stack = nginx,postgresql,python,wordpress
+; lista delle tecnologie usate dall'azienda (per CVE feed)
+web_server =                    ; apache,nginx,iis,...
+database =                      ; postgresql,mysql,mongodb,...
+language =                      ; python,java,php,...
+cms =                           ; wordpress,drupal,...
+cloud =                         ; aws,azure,gcp,...
+security =                      ; cloudflare,crowdstrike,...
+mail =                          ; exchange,postfix,...
+network =                       ; cisco,fortinet,...
 
 [sector]
-industry = cybersecurity
-products = monitoring,saas
+industry =                      ; finance,healthcare,technology,...
+products =                      ; comma-separated: product descriptions
+competitors =                   ; comma-separated: competitor names
 
 [api_keys]
-shodan_key =
-criminal_ip_key =
-quake360_key =
+shodan =
+criminal_ip =
+quake360 =
 
 [infrastructure]
-backend_ip = 192.168.1.10
-vm1_ip = 192.168.1.11
-vm2_ip = 192.168.1.12
-vm3_ip = 192.168.1.13
+backend_ip = 10.0.0.10
+vm1_ip = 10.0.0.11
+vm2_ip = 10.0.0.12
+vm3_ip = 10.0.0.13
 
 [database]
 host = 127.0.0.1
 port = 5432
-name = mmon
+name = mmon_db
 user = mmon
-password = CHANGE_ME
+password =                      ; generata da setup_backend.sh
 
 [redis]
 host = 127.0.0.1
 port = 6379
+db = 0
 
 [tor]
 socks_port = 9050
@@ -61,10 +72,19 @@ scan_interval_hours = 24
 max_concurrent_tools = 3
 
 [jwt]
-secret_key = CHANGE_ME_GENERATE_RANDOM_64_CHARS
+secret_key =                    ; generata random al primo avvio
 algorithm = HS256
-access_token_expire_minutes = 60
+expire_minutes = 1440           ; 24h
+
+[keycloak]
+; Solo per deploy_mode = company
+enabled = false
+server_url =                    ; https://keycloak.example.com
+realm = mmon
+client_id = mmon-dashboard
+client_secret =
 
 [ollama]
 base_url = http://127.0.0.1:11434
 model = qwen2.5:14b
+timeout = 120

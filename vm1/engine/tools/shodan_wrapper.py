@@ -1,191 +1,133 @@
 """
-MMON — Shodan API wrapper
-Infrastructure scan — IP, porte, servizi, vulnerabilità.
-
-Usa la libreria Python ufficiale shodan (non CLI).
-Docs: https://shodan.readthedocs.io/
+MMON VM1 — Shodan Wrapper
+Infrastructure scan + CVE feed via Shodan Python API.
+Finding categories: infrastructure, cve
 """
+from __future__ import annotations
 
+import asyncio
 from typing import Any
 
-import shodan as shodan_lib
+import structlog
 
-from .base import (
-    FindingCategory,
-    FindingPayload,
-    FindingSeverity,
-    ToolWrapper,
-)
+from .base import FindingPayload, ToolWrapper
+
+logger = structlog.get_logger(__name__)
 
 
 class ShodanWrapper(ToolWrapper):
-    """Wrapper per Shodan API — infrastructure scanning."""
+    """Wrapper per Shodan API — host lookup, search, CVE."""
 
-    tool_name = "shodan"
-    category = FindingCategory.INFRASTRUCTURE
-    default_timeout = 120
+    name = "shodan"
+    timeout = 120
 
-    def __init__(self, **kwargs: Any):
-        super().__init__(**kwargs)
-        self._api_key = self.config.get("shodan_key", "")
-        self._client: shodan_lib.Shodan | None = None
-
-    def _get_shodan(self) -> shodan_lib.Shodan:
-        """Lazy init del client Shodan."""
-        if self._client is None:
-            if not self._api_key:
-                raise RuntimeError("Shodan API key non configurata in mmon.conf")
-            self._client = shodan_lib.Shodan(self._api_key)
-        return self._client
+    def __init__(self, backend_url: str, api_key: str = "", **kwargs: Any):
+        super().__init__(backend_url, **kwargs)
+        self.api_key = api_key
 
     async def run(self, target: str, **kwargs: Any) -> dict:
-        """
-        Esegue query Shodan su IP o dominio.
+        """Esegui query Shodan. scan_type: host | search | dns."""
+        if not self.api_key:
+            raise ValueError("Shodan API key non configurata")
 
-        Args:
-            target: IP singolo, lista IP separata da virgola, o dominio
-            scan_type: "host" (default), "search", "dns"
-        """
-        import asyncio
-
+        import shodan
+        api = shodan.Shodan(self.api_key)
         scan_type = kwargs.get("scan_type", "host")
-        api = self._get_shodan()
-
-        results = {
-            "target": target,
-            "scan_type": scan_type,
-            "hosts": [],
-            "dns_records": [],
-        }
-
-        targets = [t.strip() for t in target.split(",") if t.strip()]
 
         if scan_type == "host":
-            for t in targets:
-                try:
-                    host = await asyncio.to_thread(api.host, t)
-                    results["hosts"].append(host)
-                except shodan_lib.APIError as e:
-                    results["hosts"].append({"ip_str": t, "error": str(e)})
-
+            result = await asyncio.to_thread(api.host, target)
         elif scan_type == "search":
-            try:
-                search_results = await asyncio.to_thread(
-                    api.search, f"hostname:{target}"
-                )
-                results["hosts"] = search_results.get("matches", [])
-            except shodan_lib.APIError as e:
-                results["error"] = str(e)
-
+            result = await asyncio.to_thread(api.search, target)
         elif scan_type == "dns":
-            try:
-                dns = await asyncio.to_thread(api.dns.domain_info, target)
-                results["dns_records"] = dns.get("data", [])
-            except shodan_lib.APIError as e:
-                results["error"] = str(e)
+            result = await asyncio.to_thread(api.dns.resolve, target)
+        else:
+            result = await asyncio.to_thread(api.host, target)
 
-        return results
+        return {"result": result, "target": target, "scan_type": scan_type}
 
     def parse_output(self, raw: dict) -> list[FindingPayload]:
-        """Converte output Shodan in FindingPayload."""
-        findings = []
-        target = raw.get("target", "unknown")
+        """Parsa risultati Shodan in findings infra + CVE."""
+        findings: list[FindingPayload] = []
+        target = raw.get("target", "")
+        result = raw.get("result", {})
+        scan_type = raw.get("scan_type", "host")
 
-        for host in raw.get("hosts", []):
-            if host.get("error"):
-                continue
-
-            ip = host.get("ip_str", "")
-            org = host.get("org", "")
-            os_name = host.get("os", "")
-            vulns = host.get("vulns", [])
-
-            # Finding per ogni porta/servizio
-            for service in host.get("data", []):
-                port = service.get("port")
-                product = service.get("product", "")
-                version = service.get("version", "")
-                transport = service.get("transport", "tcp")
-
-                severity = self._service_severity(port, product, vulns)
-
-                findings.append(FindingPayload(
-                    source_tool=self.tool_name,
-                    category=FindingCategory.INFRASTRUCTURE.value,
-                    severity=severity,
-                    target_ref=target,
-                    raw_data={
-                        "port": port,
-                        "transport": transport,
-                        "product": product,
-                        "version": version,
-                        "banner": (service.get("data", ""))[:500],
-                    },
-                    clean_data={
-                        "ip": ip,
-                        "port": port,
-                        "service": product or self._guess_service(port),
-                        "version": version,
-                        "os": os_name,
-                        "org": org,
-                    },
-                    tags=["shodan", "infrastructure", transport],
-                ))
-
-            # Finding per CVE associate
-            for vuln_id in vulns:
-                findings.append(FindingPayload(
-                    source_tool=self.tool_name,
-                    category=FindingCategory.CVE.value,
-                    severity=FindingSeverity.HIGH.value,
-                    target_ref=target,
-                    raw_data={"cve_id": vuln_id, "ip": ip},
-                    clean_data={
-                        "cve_id": vuln_id,
-                        "technology": f"{org} infrastructure",
-                        "nvd_url": f"https://nvd.nist.gov/vuln/detail/{vuln_id}",
-                    },
-                    tags=["cve", "shodan", "infrastructure"],
-                ))
+        if scan_type == "host":
+            findings.extend(self._parse_host(result, target))
+        elif scan_type == "search":
+            for match in result.get("matches", []):
+                findings.extend(self._parse_host(match, target))
 
         return findings
 
-    def _service_severity(
-        self, port: int | None, product: str, vulns: list
-    ) -> str:
-        """Calcola severità basata su porta, prodotto e CVE."""
-        if vulns:
-            return FindingSeverity.HIGH.value
+    def _parse_host(self, host: dict, target: str) -> list[FindingPayload]:
+        """Parsa un singolo host Shodan."""
+        findings: list[FindingPayload] = []
+        ip = host.get("ip_str", target)
 
-        critical_products = ["telnet", "ftp", "smb", "rdp"]
-        if product and any(p in product.lower() for p in critical_products):
-            return FindingSeverity.HIGH.value
+        # Servizi per porta
+        for service in host.get("data", [host] if "port" in host else []):
+            port = service.get("port", 0)
+            product = service.get("product", "")
+            version = service.get("version", "")
+            banner = service.get("data", "")[:200]
 
-        high_risk_ports = {21, 23, 25, 110, 135, 139, 445, 1433, 3306, 3389, 5432, 5900}
-        if port in high_risk_ports:
-            return FindingSeverity.HIGH.value
+            severity = "info"
+            if port in {21, 23, 25, 445, 3389, 5900}:
+                severity = "high"
+            elif port in {22, 80, 443, 8080, 8443}:
+                severity = "medium"
 
-        return FindingSeverity.MEDIUM.value
+            findings.append(FindingPayload(
+                source_tool=self.name,
+                category="infrastructure",
+                severity=severity,
+                target_ref=target,
+                raw_data={"port": port, "product": product, "version": version},
+                clean_data={
+                    "type": "service",
+                    "ip": ip,
+                    "port": port,
+                    "service": product,
+                    "version": version,
+                    "banner": banner,
+                },
+                tags=["shodan", "service", f"port-{port}"],
+            ))
 
-    def _guess_service(self, port: int | None) -> str:
-        services = {
-            21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
-            80: "http", 443: "https", 445: "smb", 3306: "mysql",
-            3389: "rdp", 5432: "postgresql", 8080: "http-proxy",
-        }
-        return services.get(port, "unknown") if port else "unknown"
+        # CVE / vulnerabilità
+        vulns = host.get("vulns", [])
+        for cve_id in vulns:
+            # Shodan fornisce ID CVE, severità da CVSS
+            cvss = None
+            cve_data = host.get("vulns_info", {}).get(cve_id, {})
+            if isinstance(cve_data, dict):
+                cvss = cve_data.get("cvss")
 
+            severity = "info"
+            if cvss is not None:
+                if cvss >= 9.0:
+                    severity = "critical"
+                elif cvss >= 7.0:
+                    severity = "high"
+                elif cvss >= 4.0:
+                    severity = "medium"
+                else:
+                    severity = "low"
 
-if __name__ == "__main__":
-    import argparse
-    import asyncio
+            findings.append(FindingPayload(
+                source_tool=self.name,
+                category="cve",
+                severity=severity,
+                target_ref=target,
+                raw_data={"cve_id": cve_id, "cvss": cvss, "ip": ip},
+                clean_data={
+                    "cve_id": cve_id,
+                    "cvss_score": cvss,
+                    "ip": ip,
+                    "product": host.get("product", ""),
+                },
+                tags=["cve", "shodan", cve_id],
+            ))
 
-    parser = argparse.ArgumentParser(description="MMON Shodan wrapper")
-    parser.add_argument("--target", required=True, help="IP o dominio")
-    parser.add_argument("--api-key", required=True, help="Shodan API key")
-    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
-    args = parser.parse_args()
-
-    wrapper = ShodanWrapper(api_base_url=args.api_url, config={"shodan_key": args.api_key})
-    result = asyncio.run(wrapper.execute(args.target))
-    print(f"Completato: {result.findings_count} findings")
+        return findings

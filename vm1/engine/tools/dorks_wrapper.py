@@ -1,171 +1,103 @@
 """
-MMON — Custom Google Dorks scraper
-Cerca informazioni esposte sui motori di ricerca usando dork query.
-
-NON usa API Google ufficiali (rate limit troppo stretto).
-Usa requests con delay randomizzati e rotazione user-agent.
-Supporta Google, Bing, DuckDuckGo.
+MMON VM1 — Custom Dorks Scraper
+Search engine dorks su DuckDuckGo (no Google per ban aggressivi).
+Finding category: keyword
 """
+from __future__ import annotations
 
 import asyncio
 import random
-import re
-import time
 from typing import Any
-from urllib.parse import quote_plus, urljoin
 
 import httpx
+import structlog
 from bs4 import BeautifulSoup
 
-from .base import (
-    FindingCategory,
-    FindingPayload,
-    FindingSeverity,
-    ToolWrapper,
-)
+from .base import FindingPayload, ToolWrapper
 
+logger = structlog.get_logger(__name__)
 
-# User agents realistici per rotazione
+# User agents per rotazione
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
+
+# Template dork per categoria
+DORK_TEMPLATES: dict[str, list[dict[str, str]]] = {
+    "exposed_files": [
+        {"query": 'site:{domain} filetype:sql', "severity": "high"},
+        {"query": 'site:{domain} filetype:env', "severity": "critical"},
+        {"query": 'site:{domain} filetype:log', "severity": "medium"},
+        {"query": 'site:{domain} filetype:bak', "severity": "high"},
+        {"query": 'site:{domain} filetype:conf', "severity": "medium"},
+        {"query": 'site:{domain} filetype:xml inurl:config', "severity": "high"},
+    ],
+    "sensitive_pages": [
+        {"query": 'site:{domain} intitle:"index of"', "severity": "medium"},
+        {"query": 'site:{domain} inurl:admin', "severity": "medium"},
+        {"query": 'site:{domain} inurl:login', "severity": "low"},
+        {"query": 'site:{domain} inurl:phpinfo', "severity": "high"},
+        {"query": 'site:{domain} inurl:.git', "severity": "critical"},
+    ],
+    "credentials_exposure": [
+        {"query": 'site:{domain} intext:password filetype:txt', "severity": "critical"},
+        {"query": 'site:{domain} intext:"api_key" OR intext:"apikey"', "severity": "high"},
+        {"query": '"{domain}" intext:password site:pastebin.com', "severity": "critical"},
+        {"query": '"{domain}" intext:password site:github.com', "severity": "critical"},
+    ],
+    "error_messages": [
+        {"query": 'site:{domain} "SQL syntax" OR "mysql_fetch"', "severity": "high"},
+        {"query": 'site:{domain} "Fatal error" OR "Stack trace"', "severity": "medium"},
+        {"query": 'site:{domain} "not found" inurl:wp-content', "severity": "low"},
+    ],
+    "person_search": [
+        {"query": '"{name}" site:linkedin.com', "severity": "info"},
+        {"query": '"{name}" site:twitter.com OR site:x.com', "severity": "info"},
+        {"query": '"{name}" "{domain}"', "severity": "info"},
+    ],
+}
 
 
 class DorksWrapper(ToolWrapper):
-    """Custom scraper per Google Dorks su motori di ricerca multipli."""
+    """Custom Google Dorks scraper via DuckDuckGo HTML."""
 
-    tool_name = "dorks"
-    category = FindingCategory.KEYWORD
-    default_timeout = 600
-    max_retries = 1  # Non retry su dorks — rischio ban
-
-    # Template dork per tipo di informazione
-    DORK_TEMPLATES = {
-        "exposed_files": [
-            'site:{domain} filetype:pdf',
-            'site:{domain} filetype:xlsx OR filetype:csv',
-            'site:{domain} filetype:doc OR filetype:docx',
-            'site:{domain} filetype:sql OR filetype:bak',
-            'site:{domain} filetype:env OR filetype:config',
-            'site:{domain} filetype:log',
-        ],
-        "sensitive_pages": [
-            'site:{domain} inurl:admin',
-            'site:{domain} inurl:login',
-            'site:{domain} inurl:dashboard',
-            'site:{domain} inurl:api',
-            'site:{domain} intitle:"index of"',
-            'site:{domain} inurl:wp-admin OR inurl:wp-login',
-        ],
-        "credentials_exposure": [
-            'site:{domain} intext:password filetype:txt',
-            'site:{domain} intext:"api_key" OR intext:"api-key"',
-            '"{domain}" intext:password site:pastebin.com OR site:github.com',
-        ],
-        "error_messages": [
-            'site:{domain} intext:"sql syntax" OR intext:"mysql_fetch"',
-            'site:{domain} intext:"Warning:" filetype:php',
-            'site:{domain} intitle:"500 Internal Server Error"',
-        ],
-        "person_search": [
-            '"{name}" site:linkedin.com',
-            '"{name}" "{company}"',
-            '"{name}" email OR contact',
-        ],
-    }
+    name = "dorks"
+    timeout = 900
+    max_retries = 2
 
     async def run(self, target: str, **kwargs: Any) -> dict:
-        """
-        Esegue Google Dorks su un target.
+        """Esegui dork queries per il target."""
+        categories = kwargs.get("categories", list(DORK_TEMPLATES.keys()))
+        names = kwargs.get("names", [])  # Per person_search
+        domain = target
 
-        Args:
-            target: Dominio da scansionare
-            dork_types: Lista di categorie dork. Default: tutte.
-            names: Lista di nomi da cercare (opzionale).
-            max_results_per_dork: Max risultati per query. Default: 10.
-        """
-        dork_types = kwargs.get("dork_types", list(self.DORK_TEMPLATES.keys()))
-        names = kwargs.get("names", [])
-        max_per_dork = kwargs.get("max_results_per_dork", 10)
-        company = kwargs.get("company", target)
+        all_results: list[dict] = []
 
-        results = {
-            "target": target,
-            "dork_results": [],
-            "total_queries": 0,
-            "total_results": 0,
-        }
+        for cat in categories:
+            templates = DORK_TEMPLATES.get(cat, [])
+            for tmpl in templates:
+                query = tmpl["query"].format(domain=domain, name=names[0] if names else domain)
 
-        queries = self._build_queries(target, dork_types, names, company)
-        results["total_queries"] = len(queries)
-
-        async with httpx.AsyncClient(
-            timeout=15.0,
-            follow_redirects=True,
-            verify=True,
-        ) as client:
-            for query_info in queries:
-                query = query_info["query"]
-                dork_type = query_info["type"]
-
-                # Delay randomizzato anti-ban
+                # Delay randomizzato (3-8s) per evitare ban
                 await asyncio.sleep(random.uniform(3.0, 8.0))
 
-                search_results = await self._search_duckduckgo(
-                    client, query, max_per_dork
-                )
+                results = await self._search_ddg(query)
+                for r in results:
+                    r["dork_category"] = cat
+                    r["dork_severity"] = tmpl["severity"]
+                    r["dork_query"] = query
+                all_results.extend(results)
 
-                for sr in search_results:
-                    sr["dork_type"] = dork_type
-                    sr["query"] = query
-                    results["dork_results"].append(sr)
+                logger.info("dork.query", category=cat, query=query[:50], results=len(results))
 
-                results["total_results"] += len(search_results)
+        return {"results": all_results, "target": target}
 
-        return results
-
-    def _build_queries(
-        self,
-        domain: str,
-        dork_types: list[str],
-        names: list[str],
-        company: str,
-    ) -> list[dict]:
-        """Genera lista di query dai template."""
-        queries = []
-
-        for dtype in dork_types:
-            templates = self.DORK_TEMPLATES.get(dtype, [])
-            for template in templates:
-                if "{name}" in template:
-                    for name in names:
-                        q = template.format(domain=domain, name=name, company=company)
-                        queries.append({"query": q, "type": dtype})
-                else:
-                    q = template.format(domain=domain, company=company)
-                    queries.append({"query": q, "type": dtype})
-
-        return queries
-
-    async def _search_duckduckgo(
-        self,
-        client: httpx.AsyncClient,
-        query: str,
-        max_results: int,
-    ) -> list[dict]:
-        """
-        Esegue ricerca su DuckDuckGo HTML (meno aggressivo di Google).
-
-        Returns:
-            Lista di dict con title, url, snippet
-        """
-        results = []
-
-        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    async def _search_ddg(self, query: str) -> list[dict]:
+        """Cerca su DuckDuckGo HTML e parsa risultati."""
+        url = "https://html.duckduckgo.com/html/"
         headers = {
             "User-Agent": random.choice(USER_AGENTS),
             "Accept": "text/html,application/xhtml+xml",
@@ -173,93 +105,69 @@ class DorksWrapper(ToolWrapper):
         }
 
         try:
-            response = await client.get(url, headers=headers)
-            if response.status_code != 200:
-                return results
+            async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+                resp = await client.post(url, data={"q": query}, headers=headers)
 
-            soup = BeautifulSoup(response.text, "html.parser")
+            if resp.status_code != 200:
+                logger.warning("ddg.status", status=resp.status_code)
+                return []
 
-            # DuckDuckGo HTML results
-            for result_div in soup.select(".result"):
-                title_tag = result_div.select_one(".result__title a")
-                snippet_tag = result_div.select_one(".result__snippet")
+            soup = BeautifulSoup(resp.text, "html.parser")
+            results = []
 
-                if not title_tag:
+            for r in soup.select(".result"):
+                title_el = r.select_one(".result__title a")
+                snippet_el = r.select_one(".result__snippet")
+
+                if not title_el:
                     continue
 
-                title = title_tag.get_text(strip=True)
-                href = title_tag.get("href", "")
-
-                # DuckDuckGo wrappa i link — estrarre URL reale
-                if "uddg=" in href:
-                    from urllib.parse import parse_qs, urlparse
-                    parsed = urlparse(href)
-                    qs = parse_qs(parsed.query)
-                    href = qs.get("uddg", [href])[0]
-
-                snippet = snippet_tag.get_text(strip=True) if snippet_tag else ""
+                title = title_el.get_text(strip=True)
+                href = title_el.get("href", "")
+                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
                 results.append({
                     "title": title,
                     "url": href,
-                    "snippet": snippet[:300],
-                    "engine": "duckduckgo",
+                    "snippet": snippet,
                 })
 
-                if len(results) >= max_results:
-                    break
+            return results[:10]  # Max 10 risultati per query
 
-        except httpx.HTTPError:
-            pass
-
-        return results
+        except Exception as e:
+            logger.error("ddg.error", error=str(e))
+            return []
 
     def parse_output(self, raw: dict) -> list[FindingPayload]:
-        """Converte risultati dork in FindingPayload."""
-        findings = []
-        target = raw.get("target", "unknown")
+        """Parsa risultati dork in findings keyword."""
+        findings: list[FindingPayload] = []
+        target = raw.get("target", "")
+        seen: set[str] = set()
 
-        for result in raw.get("dork_results", []):
-            dork_type = result.get("dork_type", "")
+        for result in raw.get("results", []):
+            url = result.get("url", "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
 
-            # Severità in base al tipo di dork
-            severity_map = {
-                "credentials_exposure": FindingSeverity.CRITICAL.value,
-                "exposed_files": FindingSeverity.HIGH.value,
-                "sensitive_pages": FindingSeverity.MEDIUM.value,
-                "error_messages": FindingSeverity.MEDIUM.value,
-                "person_search": FindingSeverity.LOW.value,
-            }
-            severity = severity_map.get(dork_type, FindingSeverity.INFO.value)
+            severity = result.get("dork_severity", "info")
+            category_name = result.get("dork_category", "")
 
             findings.append(FindingPayload(
-                source_tool=self.tool_name,
-                category=FindingCategory.KEYWORD.value,
+                source_tool=self.name,
+                category="keyword",
                 severity=severity,
                 target_ref=target,
                 raw_data=result,
                 clean_data={
-                    "query": result.get("query", ""),
+                    "type": "dork_result",
+                    "keyword": result.get("dork_query", ""),
+                    "matched_keyword": category_name,
+                    "url": url,
                     "title": result.get("title", ""),
-                    "url": result.get("url", ""),
-                    "snippet": result.get("snippet", ""),
-                    "engine": result.get("engine", "duckduckgo"),
+                    "context": result.get("snippet", ""),
                 },
-                tags=["dork", dork_type, result.get("engine", "")],
+                tags=["dork", category_name, "search"],
             ))
 
         return findings
-
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="MMON Google Dorks scraper")
-    parser.add_argument("--target", required=True, help="Dominio target")
-    parser.add_argument("--api-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--names", nargs="*", default=[], help="Nomi da cercare")
-    args = parser.parse_args()
-
-    wrapper = DorksWrapper(api_base_url=args.api_url)
-    result = asyncio.run(wrapper.execute(args.target, names=args.names))
-    print(f"Completato: {result.findings_count} risultati da {len(args.names) or 'N/A'} nomi")

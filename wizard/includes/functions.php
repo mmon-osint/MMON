@@ -1,304 +1,256 @@
 <?php
 /**
- * MMON Setup Wizard — Funzioni condivise
+ * MMON Setup Wizard — Shared Functions
  */
 
 define('MMON_BASE', '/opt/mmon');
-define('MMON_CONFIG_PATH', MMON_BASE . '/config/mmon.conf');
-define('MMON_LOCK_FILE', MMON_BASE . '/config/.wizard_completed');
-define('TOTAL_STEPS', 7);
+define('MMON_CONF', MMON_BASE . '/config/mmon.conf');
+define('MMON_LOCK', MMON_BASE . '/config/.wizard_lock');
 
 /**
- * Inizializza la sessione del wizard.
+ * Inizializza sessione wizard.
  */
-function wizard_init(): void
-{
+function wizard_init(): void {
     if (session_status() === PHP_SESSION_NONE) {
         session_start();
     }
-    if (!isset($_SESSION['wizard_data'])) {
-        $_SESSION['wizard_data'] = [];
+    if (!isset($_SESSION['wizard'])) {
+        $_SESSION['wizard'] = [];
     }
 }
 
 /**
- * Controlla se il wizard è già stato completato (lock file).
- * Restituisce true se il wizard è bloccato.
+ * Controlla se wizard è già stato completato.
  */
-function wizard_is_locked(): bool
-{
-    return file_exists(MMON_LOCK_FILE);
+function wizard_is_locked(): bool {
+    return file_exists(MMON_LOCK);
 }
 
 /**
- * Salva i dati di uno step nella sessione.
- *
- * @param int   $step  Numero dello step
- * @param array $data  Dati validati dello step
+ * Salva dati di uno step nella sessione.
  */
-function wizard_save_step(int $step, array $data): void
-{
-    $_SESSION['wizard_data']["step_{$step}"] = $data;
-    $_SESSION['wizard_data']['last_completed_step'] = $step;
+function wizard_save_step(int $step, array $data): void {
+    $_SESSION['wizard']["step{$step}"] = $data;
 }
 
 /**
- * Recupera i dati di uno step dalla sessione.
- *
- * @param int $step Numero dello step
- * @return array Dati dello step (vuoto se non compilato)
+ * Recupera dati di uno step dalla sessione.
  */
-function wizard_get_step(int $step): array
-{
-    return $_SESSION['wizard_data']["step_{$step}"] ?? [];
+function wizard_get_step(int $step): array {
+    return $_SESSION['wizard']["step{$step}"] ?? [];
 }
 
 /**
- * Restituisce l'ultimo step completato.
+ * Sanitizza lista separata da newline → array pulito.
  */
-function wizard_last_step(): int
-{
-    return $_SESSION['wizard_data']['last_completed_step'] ?? 0;
+function sanitize_list(string $input, string $separator = "\n"): array {
+    $items = explode($separator, $input);
+    return array_values(array_filter(array_map('trim', $items), fn($v) => $v !== ''));
 }
 
 /**
- * Valida un campo come non vuoto.
- *
- * @param string $value Valore da validare
- * @param string $name  Nome campo per messaggio di errore
- * @return string|null  Messaggio di errore o null se valido
+ * Validazione dominio.
  */
-function validate_required(string $value, string $name): ?string
-{
-    $value = trim($value);
-    if ($value === '') {
-        return "{$name} è obbligatorio.";
-    }
-    return null;
+function validate_domain(string $domain): bool {
+    return (bool)preg_match('/^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$/', trim($domain));
 }
 
 /**
- * Valida un indirizzo IP (v4 o v6).
+ * Validazione IP v4.
  */
-function validate_ip(string $ip): bool
-{
-    return filter_var(trim($ip), FILTER_VALIDATE_IP) !== false;
+function validate_ip(string $ip): bool {
+    return filter_var(trim($ip), FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false;
 }
 
 /**
- * Valida un dominio.
+ * Validazione email.
  */
-function validate_domain(string $domain): bool
-{
-    $domain = trim($domain);
-    return (bool) preg_match('/^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/', $domain);
-}
-
-/**
- * Valida un indirizzo email.
- */
-function validate_email(string $email): bool
-{
+function validate_email(string $email): bool {
     return filter_var(trim($email), FILTER_VALIDATE_EMAIL) !== false;
 }
 
 /**
- * Sanitizza input stringa.
+ * Genera file mmon.conf INI dai dati wizard in sessione.
  */
-function sanitize(string $input): string
-{
-    return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
-}
-
-/**
- * Sanitizza un array di stringhe separate da virgola o newline.
- * Restituisce array pulito.
- */
-function sanitize_list(string $input): array
-{
-    $items = preg_split('/[,\n\r]+/', $input);
-    $result = [];
-    foreach ($items as $item) {
-        $item = trim($item);
-        if ($item !== '') {
-            $result[] = sanitize($item);
-        }
-    }
-    return $result;
-}
-
-/**
- * Genera la configurazione mmon.conf dai dati wizard.
- *
- * @param array $data Tutti i dati wizard raccolti
- * @return string Contenuto del file mmon.conf
- */
-function generate_config(array $data): string
-{
-    $s1 = $data['step_1'] ?? [];
-    $s2 = $data['step_2'] ?? [];
-    $s3 = $data['step_3'] ?? [];
-    $s4 = $data['step_4'] ?? [];
-    $s5 = $data['step_5'] ?? [];
-    $s6 = $data['step_6'] ?? [];
-    $s7 = $data['step_7'] ?? [];
+function generate_config(): string {
+    $w = $_SESSION['wizard'];
+    $s1 = $w['step1'] ?? [];
+    $s2 = $w['step2'] ?? [];
+    $s3 = $w['step3'] ?? [];
+    $s4 = $w['step4'] ?? [];
+    $s5 = $w['step5'] ?? [];
+    $s6 = $w['step6'] ?? [];
+    $s7 = $w['step7'] ?? [];
 
     $jwt_secret = bin2hex(random_bytes(32));
-    $db_password = file_exists(MMON_BASE . '/config/.db_password')
-        ? trim(file_get_contents(MMON_BASE . '/config/.db_password'))
-        : bin2hex(random_bytes(16));
 
-    $domains = implode(',', $s2['domains'] ?? []);
-    $ips = implode(',', $s2['public_ips'] ?? []);
-    $emails = implode(',', $s2['emails'] ?? []);
-    $usernames = implode(',', $s3['usernames'] ?? []);
-    $full_names = implode(',', $s3['full_names'] ?? []);
-    $technologies = implode(',', $s4['technologies'] ?? []);
-    $products = implode(',', $s5['products'] ?? []);
+    $conf = "; MMON Configuration — generato dal Setup Wizard\n";
+    $conf .= "; " . date('Y-m-d H:i:s') . "\n\n";
 
-    $conf = <<<CONF
-; MMON Configuration File
-; Generato dal Setup Wizard — {$_SERVER['SERVER_ADDR']} — {date('Y-m-d H:i:s')}
-; NON committare questo file nel repository.
+    // [general]
+    $mode = $s1['mode'] ?? 'personal';
+    $conf .= "[general]\n";
+    $conf .= "deploy_mode = {$mode}\n";
+    $conf .= "instance_name = MMON\n";
+    $conf .= "version = 1.0.0\n\n";
 
-[general]
-mode = {$s1['mode']}
+    // [target]
+    $conf .= "[target]\n";
+    $conf .= "company_name = " . ($s2['company_name'] ?? '') . "\n";
+    $conf .= "domains = " . ($s2['domains'] ?? '') . "\n";
+    $conf .= "public_ips = " . ($s2['public_ips'] ?? '') . "\n";
+    $conf .= "emails = " . ($s2['emails'] ?? '') . "\n\n";
 
-[target]
-company_name = {$s2['company_name']}
-domains = {$domains}
-public_ips = {$ips}
-emails = {$emails}
+    // [social]
+    $usernames = implode(',', sanitize_list($s3['usernames'] ?? ''));
+    $fullnames = implode(',', sanitize_list($s3['full_names'] ?? ''));
+    $conf .= "[social]\n";
+    $conf .= "usernames = {$usernames}\n";
+    $conf .= "full_names = {$fullnames}\n\n";
 
-[social]
-usernames = {$usernames}
-full_names = {$full_names}
+    // [technologies]
+    $conf .= "[technologies]\n";
+    $tech_fields = ['web_server', 'database', 'language', 'cms', 'cloud', 'security', 'mail', 'network'];
+    foreach ($tech_fields as $f) {
+        $val = $s4[$f] ?? '';
+        if (is_array($val)) $val = implode(',', $val);
+        $conf .= "{$f} = {$val}\n";
+    }
+    if (!empty($s4['custom_tech'])) {
+        $conf .= "custom = " . $s4['custom_tech'] . "\n";
+    }
+    $conf .= "\n";
 
-[technologies]
-stack = {$technologies}
+    // [sector]
+    $conf .= "[sector]\n";
+    $conf .= "industry = " . ($s5['industry'] ?? '') . "\n";
+    $conf .= "products = " . ($s5['products'] ?? '') . "\n";
+    $conf .= "competitors = " . ($s5['competitors'] ?? '') . "\n\n";
 
-[sector]
-industry = {$s5['industry']}
-products = {$products}
+    // [api_keys]
+    $conf .= "[api_keys]\n";
+    $conf .= "shodan = " . ($s6['shodan'] ?? '') . "\n";
+    $conf .= "criminal_ip = " . ($s6['criminal_ip'] ?? '') . "\n";
+    $conf .= "quake360 = " . ($s6['quake360'] ?? '') . "\n\n";
 
-[api_keys]
-shodan_key = {$s6['shodan_key']}
-criminal_ip_key = {$s6['criminal_ip_key']}
-quake360_key = {$s6['quake360_key']}
+    // [infrastructure]
+    $conf .= "[infrastructure]\n";
+    $conf .= "backend_ip = " . ($s7['backend_ip'] ?? '127.0.0.1') . "\n";
+    $conf .= "vm1_ip = " . ($s7['vm1_ip'] ?? '') . "\n";
+    $conf .= "vm2_ip = " . ($s7['vm2_ip'] ?? '') . "\n";
+    $conf .= "vm3_ip = " . ($s7['vm3_ip'] ?? '') . "\n\n";
 
-[infrastructure]
-backend_ip = {$s7['backend_ip']}
-vm1_ip = {$s7['vm1_ip']}
-vm2_ip = {$s7['vm2_ip']}
-vm3_ip = {$s7['vm3_ip']}
+    // [database]
+    $db_pass = '';
+    $pass_file = MMON_BASE . '/config/.db_password';
+    if (file_exists($pass_file)) {
+        $db_pass = trim(file_get_contents($pass_file));
+    }
+    $conf .= "[database]\n";
+    $conf .= "host = 127.0.0.1\nport = 5432\nname = mmon_db\nuser = mmon\n";
+    $conf .= "password = {$db_pass}\n\n";
 
-[database]
-host = 127.0.0.1
-port = 5432
-name = mmon
-user = mmon
-password = {$db_password}
+    // [redis]
+    $conf .= "[redis]\nhost = 127.0.0.1\nport = 6379\ndb = 0\n\n";
 
-[redis]
-host = 127.0.0.1
-port = 6379
+    // [tor]
+    $conf .= "[tor]\n";
+    $conf .= "socks_port = " . ($s7['tor_socks_port'] ?? '9050') . "\n";
+    $conf .= "control_port = " . ($s7['tor_control_port'] ?? '9051') . "\n";
+    $conf .= "control_password = " . ($s7['tor_password'] ?? '') . "\n\n";
 
-[tor]
-socks_port = {$s7['tor_socks_port']}
-control_port = {$s7['tor_control_port']}
-control_password = {$s7['tor_control_password']}
+    // [telegram]
+    $conf .= "[telegram]\n";
+    $conf .= "api_id = " . ($s7['tg_api_id'] ?? '') . "\n";
+    $conf .= "api_hash = " . ($s7['tg_api_hash'] ?? '') . "\n";
+    $conf .= "phone = " . ($s7['tg_phone'] ?? '') . "\n\n";
 
-[telegram]
-api_id = {$s7['tg_api_id']}
-api_hash = {$s7['tg_api_hash']}
-phone = {$s7['tg_phone']}
+    // [scheduler]
+    $conf .= "[scheduler]\nscan_interval_hours = 24\nmax_concurrent_tools = 3\n\n";
 
-[scheduler]
-scan_interval_hours = 24
-max_concurrent_tools = 3
+    // [jwt]
+    $conf .= "[jwt]\nsecret_key = {$jwt_secret}\nalgorithm = HS256\nexpire_minutes = 1440\n\n";
 
-[jwt]
-secret_key = {$jwt_secret}
-algorithm = HS256
-access_token_expire_minutes = 60
+    // [keycloak]
+    $kc_enabled = ($mode === 'company') ? 'true' : 'false';
+    $conf .= "[keycloak]\n";
+    $conf .= "enabled = {$kc_enabled}\n";
+    $conf .= "server_url = " . ($s7['keycloak_url'] ?? '') . "\n";
+    $conf .= "realm = mmon\n";
+    $conf .= "client_id = mmon-dashboard\n";
+    $conf .= "client_secret = " . ($s7['keycloak_secret'] ?? '') . "\n\n";
 
-[ollama]
-base_url = http://127.0.0.1:11434
-model = qwen2.5:14b
-CONF;
+    // [ollama]
+    $conf .= "[ollama]\nbase_url = http://127.0.0.1:11434\nmodel = qwen2.5:14b\ntimeout = 120\n";
 
     return $conf;
 }
 
 /**
- * Scrive il file mmon.conf e crea il lock file.
- *
- * @param string $config_content Contenuto config
- * @return bool True se scritto correttamente
+ * Scrive config e lock file.
  */
-function write_config(string $config_content): bool
-{
-    $config_dir = MMON_BASE . '/config';
-
-    if (!is_dir($config_dir)) {
-        @mkdir($config_dir, 0700, true);
+function write_config(): bool {
+    $conf = generate_config();
+    $dir = dirname(MMON_CONF);
+    if (!is_dir($dir)) {
+        mkdir($dir, 0750, true);
     }
-
-    $written = @file_put_contents(MMON_CONFIG_PATH, $config_content);
-    if ($written === false) {
-        return false;
+    $ok = file_put_contents(MMON_CONF, $conf);
+    if ($ok !== false) {
+        chmod(MMON_CONF, 0640);
+        file_put_contents(MMON_LOCK, date('Y-m-d H:i:s'));
+        return true;
     }
-
-    @chmod(MMON_CONFIG_PATH, 0600);
-
-    // Lock file per impedire ri-esecuzione
-    @file_put_contents(MMON_LOCK_FILE, date('Y-m-d H:i:s'));
-
-    return true;
+    return false;
 }
 
 /**
- * Inizializza i target nel database PostgreSQL.
- *
- * @param array $data Dati wizard
- * @return bool True se inserimento riuscito
+ * Inizializza target nel DB da dati wizard.
  */
-function init_db_targets(array $data): bool
-{
-    $db_password = file_exists(MMON_BASE . '/config/.db_password')
-        ? trim(file_get_contents(MMON_BASE . '/config/.db_password'))
-        : '';
+function init_db_targets(): bool {
+    $w = $_SESSION['wizard'];
+    $s2 = $w['step2'] ?? [];
+    $s3 = $w['step3'] ?? [];
+
+    // Leggi password DB
+    $db_pass = '';
+    $pass_file = MMON_BASE . '/config/.db_password';
+    if (file_exists($pass_file)) {
+        $db_pass = trim(file_get_contents($pass_file));
+    }
 
     try {
-        $dsn = "pgsql:host=127.0.0.1;port=5432;dbname=mmon";
-        $pdo = new PDO($dsn, 'mmon', $db_password, [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        $dsn = "pgsql:host=127.0.0.1;port=5432;dbname=mmon_db";
+        $pdo = new PDO($dsn, 'mmon', $db_pass, [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
         ]);
 
-        $s2 = $data['step_2'] ?? [];
-        $s3 = $data['step_3'] ?? [];
-        $s4 = $data['step_4'] ?? [];
-        $s5 = $data['step_5'] ?? [];
+        $stmt = $pdo->prepare("INSERT INTO targets (name, target_type, value) VALUES (?, ?, ?) ON CONFLICT DO NOTHING");
 
-        $stmt = $pdo->prepare("
-            INSERT INTO targets (company_name, domains, public_ips, emails, usernames, full_names, technologies, industry, products)
-            VALUES (:company, :domains, :ips, :emails, :usernames, :names, :tech, :industry, :products)
-        ");
-
-        $stmt->execute([
-            ':company'   => $s2['company_name'] ?? '',
-            ':domains'   => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s2['domains'] ?? [])) . '}',
-            ':ips'       => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s2['public_ips'] ?? [])) . '}',
-            ':emails'    => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s2['emails'] ?? [])) . '}',
-            ':usernames' => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s3['usernames'] ?? [])) . '}',
-            ':names'     => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s3['full_names'] ?? [])) . '}',
-            ':tech'      => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s4['technologies'] ?? [])) . '}',
-            ':industry'  => $s5['industry'] ?? '',
-            ':products'  => '{' . implode(',', array_map(fn($d) => '"' . $d . '"', $s5['products'] ?? [])) . '}',
-        ]);
-
-        // Aggiornare config.wizard_completed
-        $pdo->exec("UPDATE config SET wizard_completed = TRUE WHERE config_id = (SELECT config_id FROM config LIMIT 1)");
+        // Domini
+        foreach (sanitize_list($s2['domains'] ?? '', ',') as $d) {
+            if (validate_domain($d)) $stmt->execute([$d, 'domain', $d]);
+        }
+        // IP
+        foreach (sanitize_list($s2['public_ips'] ?? '', ',') as $ip) {
+            if (validate_ip($ip)) $stmt->execute([$ip, 'ip', $ip]);
+        }
+        // Email
+        foreach (sanitize_list($s2['emails'] ?? '', ',') as $e) {
+            if (validate_email($e)) $stmt->execute([$e, 'email', $e]);
+        }
+        // Username
+        foreach (sanitize_list($s3['usernames'] ?? '') as $u) {
+            $stmt->execute([$u, 'username', $u]);
+        }
+        // Full names
+        foreach (sanitize_list($s3['full_names'] ?? '') as $n) {
+            $stmt->execute([$n, 'fullname', $n]);
+        }
+        // Company
+        if (!empty($s2['company_name'])) {
+            $stmt->execute([$s2['company_name'], 'company', $s2['company_name']]);
+        }
 
         return true;
     } catch (PDOException $e) {
@@ -308,56 +260,51 @@ function init_db_targets(array $data): bool
 }
 
 /**
- * Renderizza l'header HTML del wizard.
+ * Render header HTML con progress bar.
  */
-function render_header(int $current_step): void
-{
-    $step_labels = [
-        1 => 'Mode',
+function render_header(int $current_step, int $total_steps = 8): void {
+    $steps = [
+        1 => 'Modalità',
         2 => 'Target',
         3 => 'Social',
-        4 => 'Tech',
-        5 => 'Sector',
-        6 => 'API',
-        7 => 'Infra',
+        4 => 'Tecnologie',
+        5 => 'Settore',
+        6 => 'API Keys',
+        7 => 'Infrastruttura',
+        8 => 'Conferma',
     ];
-
-    echo '<!DOCTYPE html>';
-    echo '<html lang="it">';
-    echo '<head>';
-    echo '<meta charset="UTF-8">';
-    echo '<meta name="viewport" content="width=device-width, initial-scale=1.0">';
-    echo '<title>MMON — Setup Wizard</title>';
-    echo '<link rel="preconnect" href="https://fonts.googleapis.com">';
-    echo '<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">';
-    echo '<link rel="stylesheet" href="/assets/style.css">';
-    echo '</head>';
-    echo '<body>';
-
-    echo '<div class="wizard-header">';
-    echo '<h1>MMON</h1>';
-    echo '<div class="subtitle">Morpheus MONitoring — Setup Wizard</div>';
-    echo '</div>';
-
-    echo '<div class="progress-container">';
-    echo '<div class="progress-steps">';
-    foreach ($step_labels as $num => $label) {
-        $class = '';
-        if ($num < $current_step) $class = 'done';
-        elseif ($num === $current_step) $class = 'active';
-        echo "<div class=\"progress-step {$class}\">";
-        echo "<div class=\"step-dot\">{$num}</div>";
-        echo "<div class=\"step-label\">{$label}</div>";
-        echo '</div>';
-    }
-    echo '</div>';
-    echo '</div>';
+    ?>
+    <!DOCTYPE html>
+    <html lang="it">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>MMON Setup — Step <?= $current_step ?>/<?= $total_steps ?></title>
+        <link rel="stylesheet" href="assets/style.css">
+    </head>
+    <body>
+    <div class="wizard-container">
+        <div class="wizard-brand">
+            <span class="brand-icon">◉</span> MMON <span class="brand-sub">Setup Wizard</span>
+        </div>
+        <div class="progress-bar">
+            <?php foreach ($steps as $num => $label): ?>
+                <div class="progress-step <?= $num < $current_step ? 'done' : ($num === $current_step ? 'active' : '') ?>">
+                    <div class="step-num"><?= $num ?></div>
+                    <div class="step-label"><?= $label ?></div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+    <?php
 }
 
 /**
- * Renderizza il footer HTML.
+ * Render footer HTML.
  */
-function render_footer(): void
-{
-    echo '</body></html>';
+function render_footer(): void {
+    ?>
+    </div><!-- .wizard-container -->
+    </body>
+    </html>
+    <?php
 }
